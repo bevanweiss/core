@@ -56,6 +56,7 @@ from homeassistant.const import (
     CONF_ID,
     CONF_IF,
     CONF_MATCH,
+    CONF_NAME,
     CONF_PARALLEL,
     CONF_PLATFORM,
     CONF_REPEAT,
@@ -1449,6 +1450,7 @@ _SCRIPT_DELAY_SCHEMA = vol.Schema(
     {
         **SCRIPT_ACTION_BASE_SCHEMA,
         vol.Required(CONF_DELAY): positive_time_period_template,
+        vol.Optional(CONF_NAME): string,
     }
 )
 

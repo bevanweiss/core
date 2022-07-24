@@ -13,6 +13,20 @@
       "problemMatcher": []
     },
     {
+      "label": "Run Home Assistant Core - Debug",
+      "type": "shell",
+      "command": "hass -c ./config --debug",
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "new"
+      },
+      "problemMatcher": []
+    },
+    {
       "label": "Pytest",
       "type": "shell",
       "command": "pytest --timeout=10 tests",

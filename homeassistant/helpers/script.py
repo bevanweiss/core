@@ -44,6 +44,7 @@ from homeassistant.const import (
     CONF_FOR_EACH,
     CONF_IF,
     CONF_MODE,
+    CONF_NAME,
     CONF_PARALLEL,
     CONF_REPEAT,
     CONF_SCENE,
@@ -545,11 +546,33 @@ class _ScriptRun:
 
     async def _async_delay_step(self):
         """Handle delay."""
-        delay = self._get_pos_time_period_template(CONF_DELAY)
+        delay: timedelta = self._get_pos_time_period_template(CONF_DELAY)
+        delay_name: str = self._action.get(CONF_NAME, None)
 
+        retained_delay_expiry = None
+        if delay_name is not None:
+            with suppress(KeyError):
+                retained_delay_expiry = self._script.retained_delay_data[delay_name]
+
+        now: datetime = datetime.utcnow()
+        delay_expiry = now + delay
+        if (retained_delay_expiry is not None) and (
+            delay_expiry > retained_delay_expiry
+        ):
+            if retained_delay_expiry < now:
+                delay_expiry = now
+            else:
+                delay_expiry = retained_delay_expiry
+
+        delay = delay_expiry - now
         self._step_log(f"delay {delay}")
 
         delay = delay.total_seconds()
+
+        # and write the updated expiry time back to the data storage
+        if delay_name is not None:
+            self._script.updated_delay_data[delay_name] = delay_expiry
+
         self._changed()
         trace_set_result(delay=delay, done=False)
         try:
@@ -1191,6 +1214,9 @@ class Script:
         self.last_action = None
         self.last_triggered: datetime | None = None
 
+        self.retained_delay_data: dict[str, datetime] = {}
+        self.updated_delay_data: dict[str, datetime] = {}
+
         self._runs: list[_ScriptRun] = []
         self.max_runs = max_runs
         self._max_exceeded = max_exceeded
@@ -1495,6 +1521,12 @@ class Script:
         run = cls(
             self._hass, self, cast(dict, variables), context, self._log_exceptions
         )
+        with suppress(KeyError):
+            delay_items = self.updated_delay_data
+            self.updated_delay_data = {}
+            self.retained_delay_data = {}
+            self.retained_delay_data = delay_items
+
         self._runs.append(run)
         if self.script_mode == SCRIPT_MODE_RESTART:
             # When script mode is SCRIPT_MODE_RESTART, first add the new run and then
