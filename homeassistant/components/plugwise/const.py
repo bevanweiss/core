@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 import logging
-from typing import Final
+from typing import Final, Literal
 
 from homeassistant.const import Platform
 
@@ -20,9 +20,8 @@ PW_TYPE: Final = "plugwise_type"
 SMILE: Final = "smile"
 STRETCH: Final = "stretch"
 STRETCH_USERNAME: Final = "stretch"
-UNIT_LUMEN: Final = "lm"
 
-PLATFORMS_GATEWAY: Final[list[str]] = [
+PLATFORMS: Final[list[str]] = [
     Platform.BINARY_SENSOR,
     Platform.CLIMATE,
     Platform.NUMBER,
@@ -31,11 +30,28 @@ PLATFORMS_GATEWAY: Final[list[str]] = [
     Platform.SWITCH,
 ]
 ZEROCONF_MAP: Final[dict[str, str]] = {
-    "smile": "P1",
-    "smile_thermo": "Anna",
+    "smile": "Smile P1",
+    "smile_thermo": "Smile Anna",
     "smile_open_therm": "Adam",
     "stretch": "Stretch",
 }
+
+NumberType = Literal[
+    "maximum_boiler_temperature",
+    "max_dhw_temperature",
+    "temperature_offset",
+]
+
+SelectType = Literal[
+    "select_dhw_mode",
+    "select_regulation_mode",
+    "select_schedule",
+]
+SelectOptionsType = Literal[
+    "dhw_modes",
+    "regulation_modes",
+    "available_schedules",
+]
 
 # Default directives
 DEFAULT_MAX_TEMP: Final = 30
@@ -48,7 +64,7 @@ DEFAULT_SCAN_INTERVAL: Final[dict[str, timedelta]] = {
 }
 DEFAULT_USERNAME: Final = "smile"
 
-THERMOSTAT_CLASSES: Final[list[str]] = [
+MASTER_THERMOSTATS: Final[list[str]] = [
     "thermostat",
     "thermostatic_radiator_valve",
     "zone_thermometer",

@@ -20,16 +20,16 @@ import asyncio
 from collections.abc import Callable, Mapping
 import copy
 import logging
-import re
 import secrets
 import threading
 import time
 from types import MappingProxyType
-from typing import Any, Final, cast
+from typing import TYPE_CHECKING, Any, Final, cast
 
 import voluptuous as vol
+from yarl import URL
 
-from homeassistant.const import EVENT_HOMEASSISTANT_STOP
+from homeassistant.const import EVENT_HOMEASSISTANT_STOP, EVENT_LOGGING_CHANGED
 from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 import homeassistant.helpers.config_validation as cv
@@ -63,11 +63,15 @@ from .core import (
     STREAM_SETTINGS_NON_LL_HLS,
     IdleTimer,
     KeyFrameConverter,
+    Orientation,
     StreamOutput,
     StreamSettings,
 )
 from .diagnostics import Diagnostics
 from .hls import HlsStreamOutput, async_setup_hls
+
+if TYPE_CHECKING:
+    from homeassistant.components.camera import DynamicStreamSettings
 
 __all__ = [
     "ATTR_SETTINGS",
@@ -82,30 +86,33 @@ __all__ = [
     "SOURCE_TIMEOUT",
     "Stream",
     "create_stream",
+    "Orientation",
 ]
 
 _LOGGER = logging.getLogger(__name__)
 
-STREAM_SOURCE_REDACT_PATTERN = [
-    (re.compile(r"//.*:.*@"), "//****:****@"),
-    (re.compile(r"\?auth=.*"), "?auth=****"),
-]
 
-
-def redact_credentials(data: str) -> str:
+def redact_credentials(url: str) -> str:
     """Redact credentials from string data."""
-    for (pattern, repl) in STREAM_SOURCE_REDACT_PATTERN:
-        data = pattern.sub(repl, data)
-    return data
+    yurl = URL(url)
+    if yurl.user is not None:
+        yurl = yurl.with_user("****")
+    if yurl.password is not None:
+        yurl = yurl.with_password("****")
+    redacted_query_params = dict.fromkeys(
+        {"auth", "user", "password"} & yurl.query.keys(), "****"
+    )
+    return str(yurl.update_query(redacted_query_params))
 
 
 def create_stream(
     hass: HomeAssistant,
     stream_source: str,
     options: Mapping[str, str | bool | float],
+    dynamic_stream_settings: DynamicStreamSettings,
     stream_label: str | None = None,
 ) -> Stream:
-    """Create a stream with the specified identfier based on the source url.
+    """Create a stream with the specified identifier based on the source url.
 
     The stream_source is typically an rtsp url (though any url accepted by ffmpeg is fine) and
     options (see STREAM_OPTIONS_SCHEMA) are converted and passed into pyav / ffmpeg.
@@ -154,6 +161,7 @@ def create_stream(
         stream_source,
         pyav_options=pyav_options,
         stream_settings=stream_settings,
+        dynamic_stream_settings=dynamic_stream_settings,
         stream_label=stream_label,
     )
     hass.data[DOMAIN][ATTR_STREAMS].append(stream)
@@ -180,39 +188,35 @@ CONFIG_SCHEMA = vol.Schema(
 )
 
 
-def filter_libav_logging() -> None:
-    """Filter libav logging to only log when the stream logger is at DEBUG."""
+@callback
+def update_pyav_logging(_event: Event | None = None) -> None:
+    """Adjust libav logging to only log when the stream logger is at DEBUG."""
 
-    def libav_filter(record: logging.LogRecord) -> bool:
-        return logging.getLogger(__name__).isEnabledFor(logging.DEBUG)
+    def set_pyav_logging(enable: bool) -> None:
+        """Turn PyAV logging on or off."""
+        import av  # pylint: disable=import-outside-toplevel
 
-    for logging_namespace in (
-        "libav.NULL",
-        "libav.h264",
-        "libav.hevc",
-        "libav.hls",
-        "libav.mp4",
-        "libav.mpegts",
-        "libav.rtsp",
-        "libav.tcp",
-        "libav.tls",
-    ):
-        logging.getLogger(logging_namespace).addFilter(libav_filter)
+        av.logging.set_level(av.logging.VERBOSE if enable else av.logging.FATAL)
 
-    # Set log level to error for libav.mp4
-    logging.getLogger("libav.mp4").setLevel(logging.ERROR)
-    # Suppress "deprecated pixel format" WARNING
-    logging.getLogger("libav.swscaler").setLevel(logging.ERROR)
+    # enable PyAV logging iff Stream logger is set to debug
+    set_pyav_logging(logging.getLogger(__name__).isEnabledFor(logging.DEBUG))
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Set up stream."""
 
-    # Drop libav log messages if stream logging is above DEBUG
-    filter_libav_logging()
+    # Only pass through PyAV log messages if stream logging is above DEBUG
+    cancel_logging_listener = hass.bus.async_listen(
+        EVENT_LOGGING_CHANGED, update_pyav_logging
+    )
+    # libav.mp4 and libav.swscaler have a few unimportant messages that are logged
+    # at logging.WARNING. Set those Logger levels to logging.ERROR
+    for logging_namespace in ("libav.mp4", "libav.swscaler"):
+        logging.getLogger(logging_namespace).setLevel(logging.ERROR)
+    update_pyav_logging()
 
     # Keep import here so that we can import stream integration without installing reqs
-    # pylint: disable=import-outside-toplevel
+    # pylint: disable-next=import-outside-toplevel
     from .recorder import async_setup_recorder
 
     hass.data[DOMAIN] = {}
@@ -243,13 +247,14 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     async def shutdown(event: Event) -> None:
         """Stop all stream workers."""
         for stream in hass.data[DOMAIN][ATTR_STREAMS]:
-            stream.keepalive = False
+            stream.dynamic_stream_settings.preload_stream = False
         if awaitables := [
             asyncio.create_task(stream.stop())
             for stream in hass.data[DOMAIN][ATTR_STREAMS]
         ]:
             await asyncio.wait(awaitables)
         _LOGGER.debug("Stopped stream workers")
+        cancel_logging_listener()
 
     hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, shutdown)
 
@@ -265,6 +270,7 @@ class Stream:
         source: str,
         pyav_options: dict[str, str],
         stream_settings: StreamSettings,
+        dynamic_stream_settings: DynamicStreamSettings,
         stream_label: str | None = None,
     ) -> None:
         """Initialize a stream."""
@@ -273,14 +279,16 @@ class Stream:
         self.pyav_options = pyav_options
         self._stream_settings = stream_settings
         self._stream_label = stream_label
-        self.keepalive = False
+        self.dynamic_stream_settings = dynamic_stream_settings
         self.access_token: str | None = None
         self._start_stop_lock = asyncio.Lock()
         self._thread: threading.Thread | None = None
         self._thread_quit = threading.Event()
         self._outputs: dict[str, StreamOutput] = {}
         self._fast_restart_once = False
-        self._keyframe_converter = KeyFrameConverter(hass)
+        self._keyframe_converter = KeyFrameConverter(
+            hass, stream_settings, dynamic_stream_settings
+        )
         self._available: bool = True
         self._update_callback: Callable[[], None] | None = None
         self._logger = (
@@ -313,7 +321,8 @@ class Stream:
 
             async def idle_callback() -> None:
                 if (
-                    not self.keepalive or fmt == RECORDER_PROVIDER
+                    not self.dynamic_stream_settings.preload_stream
+                    or fmt == RECORDER_PROVIDER
                 ) and fmt in self._outputs:
                     await self.remove_provider(self._outputs[fmt])
                 self.check_idle()
@@ -322,6 +331,7 @@ class Stream:
                 self.hass,
                 IdleTimer(self.hass, timeout, idle_callback),
                 self._stream_settings,
+                self.dynamic_stream_settings,
             )
             self._outputs[fmt] = provider
 
@@ -392,7 +402,7 @@ class Stream:
     def _run_worker(self) -> None:
         """Handle consuming streams and restart keepalive streams."""
         # Keep import here so that we can import stream integration without installing reqs
-        # pylint: disable=import-outside-toplevel
+        # pylint: disable-next=import-outside-toplevel
         from .worker import StreamState, StreamWorkerError, stream_worker
 
         stream_state = StreamState(self.hass, self.outputs, self._diagnostics)
@@ -400,7 +410,12 @@ class Stream:
         while not self._thread_quit.wait(timeout=wait_timeout):
             start_time = time.time()
             self.hass.add_job(self._async_update_state, True)
-            self._diagnostics.set_value("keepalive", self.keepalive)
+            self._diagnostics.set_value(
+                "keepalive", self.dynamic_stream_settings.preload_stream
+            )
+            self._diagnostics.set_value(
+                "orientation", self.dynamic_stream_settings.orientation
+            )
             self._diagnostics.increment("start_worker")
             try:
                 stream_worker(
@@ -459,7 +474,7 @@ class Stream:
         self._outputs = {}
         self.access_token = None
 
-        if not self.keepalive:
+        if not self.dynamic_stream_settings.preload_stream:
             await self._stop()
 
     async def _stop(self) -> None:
@@ -483,7 +498,7 @@ class Stream:
         """Make a .mp4 recording from a provided stream."""
 
         # Keep import here so that we can import stream integration without installing reqs
-        # pylint: disable=import-outside-toplevel
+        # pylint: disable-next=import-outside-toplevel
         from .recorder import RecorderOutput
 
         # Check for file access
@@ -519,9 +534,9 @@ class Stream:
         self,
         width: int | None = None,
         height: int | None = None,
+        wait_for_next_keyframe: bool = False,
     ) -> bytes | None:
-        """
-        Fetch an image from the Stream and return it as a jpeg in bytes.
+        """Fetch an image from the Stream and return it as a jpeg in bytes.
 
         Calls async_get_image from KeyFrameConverter. async_get_image should only be
         called directly from the main loop and not from an executor thread as it uses
@@ -531,7 +546,9 @@ class Stream:
         self.add_provider(HLS_PROVIDER)
         await self.start()
         return await self._keyframe_converter.async_get_image(
-            width=width, height=height
+            width=width,
+            height=height,
+            wait_for_next_keyframe=wait_for_next_keyframe,
         )
 
     def get_diagnostics(self) -> dict[str, Any]:

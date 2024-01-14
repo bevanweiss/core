@@ -5,25 +5,23 @@ CONF_EXCHANGE_BASE = "exchange_base"
 CONF_EXCHANGE_RATES = "exchange_rate_currencies"
 CONF_EXCHANGE_PRECISION = "exchange_rate_precision"
 CONF_EXCHANGE_PRECISION_DEFAULT = 2
-CONF_OPTIONS = "options"
 CONF_TITLE = "title"
 DOMAIN = "coinbase"
-
-# These are constants used by the previous YAML configuration
-CONF_YAML_API_TOKEN = "api_secret"
 
 # Constants for data returned by Coinbase API
 API_ACCOUNT_AMOUNT = "amount"
 API_ACCOUNT_BALANCE = "balance"
 API_ACCOUNT_CURRENCY = "currency"
+API_ACCOUNT_CURRENCY_CODE = "code"
 API_ACCOUNT_ID = "id"
-API_ACCOUNT_NATIVE_BALANCE = "native_balance"
+API_ACCOUNT_NATIVE_BALANCE = "balance"
 API_ACCOUNT_NAME = "name"
 API_ACCOUNTS_DATA = "data"
 API_RATES = "rates"
 API_RESOURCE_PATH = "resource_path"
 API_RESOURCE_TYPE = "type"
 API_TYPE_VAULT = "vault"
+API_USD = "USD"
 
 WALLETS = {
     "1INCH": "1INCH",
@@ -110,6 +108,7 @@ WALLETS = {
     "FJD": "FJD",
     "FKP": "FKP",
     "FORTH": "FORTH",
+    "GALA": "GALA",
     "GBP": "GBP",
     "GBX": "GBX",
     "GEL": "GEL",
@@ -160,6 +159,7 @@ WALLETS = {
     "LYD": "LYD",
     "MAD": "MAD",
     "MANA": "MANA",
+    "MASK": "MASK",
     "MATIC": "MATIC",
     "MDL": "MDL",
     "MGA": "MGA",

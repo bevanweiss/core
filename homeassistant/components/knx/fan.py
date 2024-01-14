@@ -14,10 +14,10 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.typing import ConfigType
 from homeassistant.util.percentage import (
-    int_states_in_range,
     percentage_to_ranged_value,
     ranged_value_to_percentage,
 )
+from homeassistant.util.scaling import int_states_in_range
 
 from .const import DATA_KNX_CONFIG, DOMAIN, KNX_ADDRESS
 from .knx_entity import KnxEntity
@@ -76,9 +76,9 @@ class KNXFan(KnxEntity, FanEntity):
             await self._device.set_speed(percentage)
 
     @property
-    def supported_features(self) -> int:
+    def supported_features(self) -> FanEntityFeature:
         """Flag supported features."""
-        flags: int = FanEntityFeature.SET_SPEED
+        flags = FanEntityFeature.SET_SPEED
 
         if self._device.supports_oscillation:
             flags |= FanEntityFeature.OSCILLATE

@@ -2,15 +2,18 @@
 from time import time
 from unittest.mock import AsyncMock, patch
 
+from pyatmo.const import ALL_SCOPES
 import pytest
 
-from .common import ALL_SCOPES, fake_get_image, fake_post_request
+from homeassistant.core import HomeAssistant
+
+from .common import fake_get_image, fake_post_request
 
 from tests.common import MockConfigEntry
 
 
 @pytest.fixture(name="config_entry")
-def mock_config_entry_fixture(hass):
+def mock_config_entry_fixture(hass: HomeAssistant) -> MockConfigEntry:
     """Mock a config entry."""
     mock_entry = MockConfigEntry(
         domain="netatmo",
@@ -54,12 +57,13 @@ def mock_config_entry_fixture(hass):
 
 
 @pytest.fixture(name="netatmo_auth")
-def netatmo_auth():
+def netatmo_auth() -> AsyncMock:
     """Restrict loaded platforms to list given."""
     with patch(
         "homeassistant.components.netatmo.api.AsyncConfigEntryNetatmoAuth"
     ) as mock_auth:
         mock_auth.return_value.async_post_request.side_effect = fake_post_request
+        mock_auth.return_value.async_post_api_request.side_effect = fake_post_request
         mock_auth.return_value.async_get_image.side_effect = fake_get_image
         mock_auth.return_value.async_addwebhook.side_effect = AsyncMock()
         mock_auth.return_value.async_dropwebhook.side_effect = AsyncMock()

@@ -1,17 +1,27 @@
 """Handler for Hass.io."""
+from __future__ import annotations
+
 import asyncio
+from collections.abc import Coroutine
 from http import HTTPStatus
 import logging
 import os
+from typing import Any
 
 import aiohttp
+from yarl import URL
 
+from homeassistant.auth.models import RefreshToken
 from homeassistant.components.http import (
     CONF_SERVER_HOST,
     CONF_SERVER_PORT,
     CONF_SSL_CERTIFICATE,
 )
 from homeassistant.const import SERVER_PORT
+from homeassistant.core import HomeAssistant
+from homeassistant.loader import bind_hass
+
+from .const import ATTR_DISCOVERY, DOMAIN, X_HASS_SOURCE
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -47,6 +57,266 @@ def api_data(funct):
     return _wrapper
 
 
+@bind_hass
+async def async_get_addon_info(hass: HomeAssistant, slug: str) -> dict:
+    """Return add-on info.
+
+    The add-on must be installed.
+    The caller of the function should handle HassioAPIError.
+    """
+    hassio: HassIO = hass.data[DOMAIN]
+    return await hassio.get_addon_info(slug)
+
+
+@api_data
+async def async_get_addon_store_info(hass: HomeAssistant, slug: str) -> dict:
+    """Return add-on store info.
+
+    The caller of the function should handle HassioAPIError.
+    """
+    hassio: HassIO = hass.data[DOMAIN]
+    command = f"/store/addons/{slug}"
+    return await hassio.send_command(command, method="get")
+
+
+@bind_hass
+async def async_update_diagnostics(hass: HomeAssistant, diagnostics: bool) -> dict:
+    """Update Supervisor diagnostics toggle.
+
+    The caller of the function should handle HassioAPIError.
+    """
+    hassio: HassIO = hass.data[DOMAIN]
+    return await hassio.update_diagnostics(diagnostics)
+
+
+@bind_hass
+@api_data
+async def async_install_addon(hass: HomeAssistant, slug: str) -> dict:
+    """Install add-on.
+
+    The caller of the function should handle HassioAPIError.
+    """
+    hassio: HassIO = hass.data[DOMAIN]
+    command = f"/addons/{slug}/install"
+    return await hassio.send_command(command, timeout=None)
+
+
+@bind_hass
+@api_data
+async def async_uninstall_addon(hass: HomeAssistant, slug: str) -> dict:
+    """Uninstall add-on.
+
+    The caller of the function should handle HassioAPIError.
+    """
+    hassio: HassIO = hass.data[DOMAIN]
+    command = f"/addons/{slug}/uninstall"
+    return await hassio.send_command(command, timeout=60)
+
+
+@bind_hass
+@api_data
+async def async_update_addon(
+    hass: HomeAssistant,
+    slug: str,
+    backup: bool = False,
+) -> dict:
+    """Update add-on.
+
+    The caller of the function should handle HassioAPIError.
+    """
+    hassio: HassIO = hass.data[DOMAIN]
+    command = f"/addons/{slug}/update"
+    return await hassio.send_command(
+        command,
+        payload={"backup": backup},
+        timeout=None,
+    )
+
+
+@bind_hass
+@api_data
+async def async_start_addon(hass: HomeAssistant, slug: str) -> dict:
+    """Start add-on.
+
+    The caller of the function should handle HassioAPIError.
+    """
+    hassio: HassIO = hass.data[DOMAIN]
+    command = f"/addons/{slug}/start"
+    return await hassio.send_command(command, timeout=60)
+
+
+@bind_hass
+@api_data
+async def async_restart_addon(hass: HomeAssistant, slug: str) -> dict:
+    """Restart add-on.
+
+    The caller of the function should handle HassioAPIError.
+    """
+    hassio: HassIO = hass.data[DOMAIN]
+    command = f"/addons/{slug}/restart"
+    return await hassio.send_command(command, timeout=None)
+
+
+@bind_hass
+@api_data
+async def async_stop_addon(hass: HomeAssistant, slug: str) -> dict:
+    """Stop add-on.
+
+    The caller of the function should handle HassioAPIError.
+    """
+    hassio: HassIO = hass.data[DOMAIN]
+    command = f"/addons/{slug}/stop"
+    return await hassio.send_command(command, timeout=60)
+
+
+@bind_hass
+@api_data
+async def async_set_addon_options(
+    hass: HomeAssistant, slug: str, options: dict
+) -> dict:
+    """Set add-on options.
+
+    The caller of the function should handle HassioAPIError.
+    """
+    hassio: HassIO = hass.data[DOMAIN]
+    command = f"/addons/{slug}/options"
+    return await hassio.send_command(command, payload=options)
+
+
+@bind_hass
+async def async_get_addon_discovery_info(hass: HomeAssistant, slug: str) -> dict | None:
+    """Return discovery data for an add-on."""
+    hassio: HassIO = hass.data[DOMAIN]
+    data = await hassio.retrieve_discovery_messages()
+    discovered_addons = data[ATTR_DISCOVERY]
+    return next((addon for addon in discovered_addons if addon["addon"] == slug), None)
+
+
+@bind_hass
+@api_data
+async def async_create_backup(
+    hass: HomeAssistant, payload: dict, partial: bool = False
+) -> dict:
+    """Create a full or partial backup.
+
+    The caller of the function should handle HassioAPIError.
+    """
+    hassio: HassIO = hass.data[DOMAIN]
+    backup_type = "partial" if partial else "full"
+    command = f"/backups/new/{backup_type}"
+    return await hassio.send_command(command, payload=payload, timeout=None)
+
+
+@bind_hass
+@api_data
+async def async_update_os(hass: HomeAssistant, version: str | None = None) -> dict:
+    """Update Home Assistant Operating System.
+
+    The caller of the function should handle HassioAPIError.
+    """
+    hassio: HassIO = hass.data[DOMAIN]
+    command = "/os/update"
+    return await hassio.send_command(
+        command,
+        payload={"version": version},
+        timeout=None,
+    )
+
+
+@bind_hass
+@api_data
+async def async_update_supervisor(hass: HomeAssistant) -> dict:
+    """Update Home Assistant Supervisor.
+
+    The caller of the function should handle HassioAPIError.
+    """
+    hassio: HassIO = hass.data[DOMAIN]
+    command = "/supervisor/update"
+    return await hassio.send_command(command, timeout=None)
+
+
+@bind_hass
+@api_data
+async def async_update_core(
+    hass: HomeAssistant, version: str | None = None, backup: bool = False
+) -> dict:
+    """Update Home Assistant Core.
+
+    The caller of the function should handle HassioAPIError.
+    """
+    hassio: HassIO = hass.data[DOMAIN]
+    command = "/core/update"
+    return await hassio.send_command(
+        command,
+        payload={"version": version, "backup": backup},
+        timeout=None,
+    )
+
+
+@bind_hass
+@_api_bool
+async def async_apply_suggestion(hass: HomeAssistant, suggestion_uuid: str) -> bool:
+    """Apply a suggestion from supervisor's resolution center.
+
+    The caller of the function should handle HassioAPIError.
+    """
+    hassio: HassIO = hass.data[DOMAIN]
+    command = f"/resolution/suggestion/{suggestion_uuid}"
+    return await hassio.send_command(command, timeout=None)
+
+
+@api_data
+async def async_get_green_settings(hass: HomeAssistant) -> dict[str, bool]:
+    """Return settings specific to Home Assistant Green."""
+    hassio: HassIO = hass.data[DOMAIN]
+    return await hassio.send_command("/os/boards/green", method="get")
+
+
+@api_data
+async def async_set_green_settings(
+    hass: HomeAssistant, settings: dict[str, bool]
+) -> dict:
+    """Set settings specific to Home Assistant Green.
+
+    Returns an empty dict.
+    """
+    hassio: HassIO = hass.data[DOMAIN]
+    return await hassio.send_command(
+        "/os/boards/green", method="post", payload=settings
+    )
+
+
+@api_data
+async def async_get_yellow_settings(hass: HomeAssistant) -> dict[str, bool]:
+    """Return settings specific to Home Assistant Yellow."""
+    hassio: HassIO = hass.data[DOMAIN]
+    return await hassio.send_command("/os/boards/yellow", method="get")
+
+
+@api_data
+async def async_set_yellow_settings(
+    hass: HomeAssistant, settings: dict[str, bool]
+) -> dict:
+    """Set settings specific to Home Assistant Yellow.
+
+    Returns an empty dict.
+    """
+    hassio: HassIO = hass.data[DOMAIN]
+    return await hassio.send_command(
+        "/os/boards/yellow", method="post", payload=settings
+    )
+
+
+@api_data
+async def async_reboot_host(hass: HomeAssistant) -> dict:
+    """Reboot the host.
+
+    Returns an empty dict.
+    """
+    hassio: HassIO = hass.data[DOMAIN]
+    return await hassio.send_command("/host/reboot", method="post", timeout=60)
+
+
 class HassIO:
     """Small API wrapper for Hass.io."""
 
@@ -62,39 +332,39 @@ class HassIO:
         self._ip = ip
 
     @_api_bool
-    def is_connected(self):
+    def is_connected(self) -> Coroutine:
         """Return true if it connected to Hass.io supervisor.
 
-        This method return a coroutine.
+        This method returns a coroutine.
         """
         return self.send_command("/supervisor/ping", method="get", timeout=15)
 
     @api_data
-    def get_info(self):
+    def get_info(self) -> Coroutine:
         """Return generic Supervisor information.
 
-        This method return a coroutine.
+        This method returns a coroutine.
         """
         return self.send_command("/info", method="get")
 
     @api_data
-    def get_host_info(self):
+    def get_host_info(self) -> Coroutine:
         """Return data for Host.
 
-        This method return a coroutine.
+        This method returns a coroutine.
         """
         return self.send_command("/host/info", method="get")
 
     @api_data
-    def get_os_info(self):
+    def get_os_info(self) -> Coroutine:
         """Return data for the OS.
 
-        This method return a coroutine.
+        This method returns a coroutine.
         """
         return self.send_command("/os/info", method="get")
 
     @api_data
-    def get_core_info(self):
+    def get_core_info(self) -> Coroutine:
         """Return data for Home Asssistant Core.
 
         This method returns a coroutine.
@@ -102,7 +372,7 @@ class HassIO:
         return self.send_command("/core/info", method="get")
 
     @api_data
-    def get_supervisor_info(self):
+    def get_supervisor_info(self) -> Coroutine:
         """Return data for the Supervisor.
 
         This method returns a coroutine.
@@ -110,22 +380,38 @@ class HassIO:
         return self.send_command("/supervisor/info", method="get")
 
     @api_data
-    def get_addon_info(self, addon):
+    def get_addon_info(self, addon: str) -> Coroutine:
         """Return data for a Add-on.
 
-        This method return a coroutine.
+        This method returns a coroutine.
         """
         return self.send_command(f"/addons/{addon}/info", method="get")
 
     @api_data
-    def get_addon_stats(self, addon):
+    def get_core_stats(self) -> Coroutine:
+        """Return stats for the core.
+
+        This method returns a coroutine.
+        """
+        return self.send_command("/core/stats", method="get")
+
+    @api_data
+    def get_addon_stats(self, addon: str) -> Coroutine:
         """Return stats for an Add-on.
 
         This method returns a coroutine.
         """
         return self.send_command(f"/addons/{addon}/stats", method="get")
 
-    def get_addon_changelog(self, addon):
+    @api_data
+    def get_supervisor_stats(self) -> Coroutine:
+        """Return stats for the supervisor.
+
+        This method returns a coroutine.
+        """
+        return self.send_command("/supervisor/stats", method="get")
+
+    def get_addon_changelog(self, addon: str) -> Coroutine:
         """Return changelog for an Add-on.
 
         This method returns a coroutine.
@@ -135,63 +421,85 @@ class HassIO:
         )
 
     @api_data
-    def get_store(self):
+    def get_store(self) -> Coroutine:
         """Return data from the store.
 
-        This method return a coroutine.
+        This method returns a coroutine.
         """
         return self.send_command("/store", method="get")
 
     @api_data
-    def get_ingress_panels(self):
+    def get_ingress_panels(self) -> Coroutine:
         """Return data for Add-on ingress panels.
 
-        This method return a coroutine.
+        This method returns a coroutine.
         """
         return self.send_command("/ingress/panels", method="get")
 
     @_api_bool
-    def restart_homeassistant(self):
+    def restart_homeassistant(self) -> Coroutine:
         """Restart Home-Assistant container.
 
-        This method return a coroutine.
+        This method returns a coroutine.
         """
         return self.send_command("/homeassistant/restart")
 
     @_api_bool
-    def stop_homeassistant(self):
+    def stop_homeassistant(self) -> Coroutine:
         """Stop Home-Assistant container.
 
-        This method return a coroutine.
+        This method returns a coroutine.
         """
         return self.send_command("/homeassistant/stop")
 
     @_api_bool
-    def refresh_updates(self):
+    def refresh_updates(self) -> Coroutine:
         """Refresh available updates.
 
-        This method return a coroutine.
+        This method returns a coroutine.
         """
         return self.send_command("/refresh_updates", timeout=None)
 
     @api_data
-    def retrieve_discovery_messages(self):
+    def retrieve_discovery_messages(self) -> Coroutine:
         """Return all discovery data from Hass.io API.
 
-        This method return a coroutine.
+        This method returns a coroutine.
         """
         return self.send_command("/discovery", method="get", timeout=60)
 
     @api_data
-    def get_discovery_message(self, uuid):
+    def get_discovery_message(self, uuid: str) -> Coroutine:
         """Return a single discovery data message.
 
-        This method return a coroutine.
+        This method returns a coroutine.
         """
         return self.send_command(f"/discovery/{uuid}", method="get")
 
+    @api_data
+    def get_resolution_info(self) -> Coroutine:
+        """Return data for Supervisor resolution center.
+
+        This method returns a coroutine.
+        """
+        return self.send_command("/resolution/info", method="get")
+
+    @api_data
+    def get_suggestions_for_issue(
+        self, issue_id: str
+    ) -> Coroutine[Any, Any, dict[str, Any]]:
+        """Return suggestions for issue from Supervisor resolution center.
+
+        This method returns a coroutine.
+        """
+        return self.send_command(
+            f"/resolution/issue/{issue_id}/suggestions", method="get"
+        )
+
     @_api_bool
-    async def update_hass_api(self, http_config, refresh_token):
+    async def update_hass_api(
+        self, http_config: dict[str, Any], refresh_token: RefreshToken
+    ):
         """Update Home Assistant API data on Hass.io."""
         port = http_config.get(CONF_SERVER_PORT) or SERVER_PORT
         options = {
@@ -204,48 +512,67 @@ class HassIO:
         if http_config.get(CONF_SERVER_HOST) is not None:
             options["watchdog"] = False
             _LOGGER.warning(
-                "Found incompatible HTTP option 'server_host'. Watchdog feature disabled"
+                "Found incompatible HTTP option 'server_host'. Watchdog feature"
+                " disabled"
             )
 
         return await self.send_command("/homeassistant/options", payload=options)
 
     @_api_bool
-    def update_hass_timezone(self, timezone):
+    def update_hass_timezone(self, timezone: str) -> Coroutine:
         """Update Home-Assistant timezone data on Hass.io.
 
-        This method return a coroutine.
+        This method returns a coroutine.
         """
         return self.send_command("/supervisor/options", payload={"timezone": timezone})
 
     @_api_bool
-    def update_diagnostics(self, diagnostics: bool):
+    def update_diagnostics(self, diagnostics: bool) -> Coroutine:
         """Update Supervisor diagnostics setting.
 
-        This method return a coroutine.
+        This method returns a coroutine.
         """
         return self.send_command(
             "/supervisor/options", payload={"diagnostics": diagnostics}
         )
 
+    @_api_bool
+    def apply_suggestion(self, suggestion_uuid: str) -> Coroutine:
+        """Apply a suggestion from supervisor's resolution center.
+
+        This method returns a coroutine.
+        """
+        return self.send_command(f"/resolution/suggestion/{suggestion_uuid}")
+
     async def send_command(
         self,
-        command,
-        method="post",
-        payload=None,
-        timeout=10,
-        return_text=False,
-    ):
+        command: str,
+        method: str = "post",
+        payload: Any | None = None,
+        timeout: int | None = 10,
+        return_text: bool = False,
+        *,
+        source: str = "core.handler",
+    ) -> Any:
         """Send API command to Hass.io.
 
         This method is a coroutine.
         """
+        url = f"http://{self._ip}{command}"
+        if url != str(URL(url)):
+            _LOGGER.error("Invalid request %s", command)
+            raise HassioAPIError()
+
         try:
             request = await self.websession.request(
                 method,
                 f"http://{self._ip}{command}",
                 json=payload,
                 headers={
-                    aiohttp.hdrs.AUTHORIZATION: f"Bearer {os.environ.get('SUPERVISOR_TOKEN', '')}"
+                    aiohttp.hdrs.AUTHORIZATION: (
+                        f"Bearer {os.environ.get('SUPERVISOR_TOKEN', '')}"
+                    ),
+                    X_HASS_SOURCE: source,
                 },
                 timeout=aiohttp.ClientTimeout(total=timeout),
             )

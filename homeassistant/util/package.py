@@ -2,15 +2,15 @@
 from __future__ import annotations
 
 import asyncio
+from functools import cache
 from importlib.metadata import PackageNotFoundError, version
 import logging
 import os
 from pathlib import Path
 from subprocess import PIPE, Popen
 import sys
-from urllib.parse import urlparse
 
-import pkg_resources
+from packaging.requirements import InvalidRequirement, Requirement
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -23,36 +23,42 @@ def is_virtual_env() -> bool:
     )
 
 
+@cache
 def is_docker_env() -> bool:
     """Return True if we run in a docker env."""
     return Path("/.dockerenv").exists()
 
 
-def is_installed(package: str) -> bool:
+def get_installed_versions(specifiers: set[str]) -> set[str]:
+    """Return a set of installed packages and versions."""
+    return {specifier for specifier in specifiers if is_installed(specifier)}
+
+
+def is_installed(requirement_str: str) -> bool:
     """Check if a package is installed and will be loaded when we import it.
+
+    expected input is a pip compatible package specifier (requirement string)
+    e.g. "package==1.0.0" or "package>=1.0.0,<2.0.0"
 
     Returns True when the requirement is met.
     Returns False when the package is not installed or doesn't meet req.
     """
     try:
-        pkg_resources.get_distribution(package)
-        return True
-    except (pkg_resources.ResolutionError, pkg_resources.ExtractionError):
-        req = pkg_resources.Requirement.parse(package)
-    except ValueError:
-        # This is a zip file. We no longer use this in Home Assistant,
-        # leaving it in for custom components.
-        req = pkg_resources.Requirement.parse(urlparse(package).fragment)
+        req = Requirement(requirement_str)
+    except InvalidRequirement:
+        _LOGGER.error("Invalid requirement '%s'", requirement_str)
+        return False
 
     try:
-        installed_version = version(req.project_name)
-        # This will happen when an install failed or
-        # was aborted while in progress see
-        # https://github.com/home-assistant/core/issues/47699
-        if installed_version is None:
-            _LOGGER.error("Installed version for %s resolved to None", req.project_name)  # type: ignore[unreachable]
+        if (installed_version := version(req.name)) is None:
+            # This can happen when an install failed or
+            # was aborted while in progress see
+            # https://github.com/home-assistant/core/issues/47699
+            _LOGGER.error(  # type: ignore[unreachable]
+                "Installed version for %s resolved to None", req.name
+            )
             return False
-        return installed_version in req
+        return req.specifier.contains(installed_version, prereleases=True)
     except PackageNotFoundError:
         return False
 
@@ -62,9 +68,7 @@ def install_package(
     upgrade: bool = True,
     target: str | None = None,
     constraints: str | None = None,
-    find_links: str | None = None,
     timeout: int | None = None,
-    no_cache_dir: bool | None = False,
 ) -> bool:
     """Install a package on PyPi. Accepts pip compatible package strings.
 
@@ -76,21 +80,24 @@ def install_package(
     args = [sys.executable, "-m", "pip", "install", "--quiet", package]
     if timeout:
         args += ["--timeout", str(timeout)]
-    if no_cache_dir:
-        args.append("--no-cache-dir")
     if upgrade:
         args.append("--upgrade")
     if constraints is not None:
         args += ["--constraint", constraints]
-    if find_links is not None:
-        args += ["--find-links", find_links, "--prefer-binary"]
     if target:
         assert not is_virtual_env()
         # This only works if not running in venv
         args += ["--user"]
         env["PYTHONUSERBASE"] = os.path.abspath(target)
     _LOGGER.debug("Running pip command: args=%s", args)
-    with Popen(args, stdin=PIPE, stdout=PIPE, stderr=PIPE, env=env) as process:
+    with Popen(
+        args,
+        stdin=PIPE,
+        stdout=PIPE,
+        stderr=PIPE,
+        env=env,
+        close_fds=False,  # required for posix_spawn
+    ) as process:
         _, stderr = process.communicate()
         if process.returncode != 0:
             _LOGGER.error(
@@ -117,6 +124,7 @@ async def async_get_user_site(deps_dir: str) -> str:
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.DEVNULL,
         env=env,
+        close_fds=False,  # required for posix_spawn
     )
     stdout, _ = await process.communicate()
     lib_dir = stdout.decode().strip()

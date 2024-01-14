@@ -1,13 +1,15 @@
 """The tests for Octoptint binary sensor module."""
-from datetime import datetime, timezone
-from unittest.mock import patch
+from datetime import UTC, datetime
 
+from freezegun.api import FrozenDateTimeFactory
+
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 
 from . import init_integration
 
 
-async def test_sensors(hass):
+async def test_sensors(hass: HomeAssistant, freezer: FrozenDateTimeFactory) -> None:
     """Test the underlying sensors."""
     printer = {
         "state": {
@@ -21,11 +23,8 @@ async def test_sensors(hass):
         "progress": {"completion": 50, "printTime": 600, "printTimeLeft": 6000},
         "state": "Printing",
     }
-    with patch(
-        "homeassistant.util.dt.utcnow",
-        return_value=datetime(2020, 2, 20, 9, 10, 13, 543, tzinfo=timezone.utc),
-    ):
-        await init_integration(hass, "sensor", printer=printer, job=job)
+    freezer.move_to(datetime(2020, 2, 20, 9, 10, 13, 543, tzinfo=UTC))
+    await init_integration(hass, "sensor", printer=printer, job=job)
 
     entity_registry = er.async_get(hass)
 
@@ -79,7 +78,9 @@ async def test_sensors(hass):
     assert entry.unique_id == "Estimated Finish Time-uuid"
 
 
-async def test_sensors_no_target_temp(hass):
+async def test_sensors_no_target_temp(
+    hass: HomeAssistant, freezer: FrozenDateTimeFactory
+) -> None:
     """Test the underlying sensors."""
     printer = {
         "state": {
@@ -88,10 +89,8 @@ async def test_sensors_no_target_temp(hass):
         },
         "temperature": {"tool1": {"actual": 18.83136, "target": None}},
     }
-    with patch(
-        "homeassistant.util.dt.utcnow", return_value=datetime(2020, 2, 20, 9, 10, 0)
-    ):
-        await init_integration(hass, "sensor", printer=printer)
+    freezer.move_to(datetime(2020, 2, 20, 9, 10, 0))
+    await init_integration(hass, "sensor", printer=printer)
 
     entity_registry = er.async_get(hass)
 
@@ -110,7 +109,9 @@ async def test_sensors_no_target_temp(hass):
     assert entry.unique_id == "target tool1 temp-uuid"
 
 
-async def test_sensors_paused(hass):
+async def test_sensors_paused(
+    hass: HomeAssistant, freezer: FrozenDateTimeFactory
+) -> None:
     """Test the underlying sensors."""
     printer = {
         "state": {
@@ -124,10 +125,8 @@ async def test_sensors_paused(hass):
         "progress": {"completion": 50, "printTime": 600, "printTimeLeft": 6000},
         "state": "Paused",
     }
-    with patch(
-        "homeassistant.util.dt.utcnow", return_value=datetime(2020, 2, 20, 9, 10, 0)
-    ):
-        await init_integration(hass, "sensor", printer=printer, job=job)
+    freezer.move_to(datetime(2020, 2, 20, 9, 10, 0))
+    await init_integration(hass, "sensor", printer=printer, job=job)
 
     entity_registry = er.async_get(hass)
 
@@ -146,17 +145,17 @@ async def test_sensors_paused(hass):
     assert entry.unique_id == "Estimated Finish Time-uuid"
 
 
-async def test_sensors_printer_disconnected(hass):
+async def test_sensors_printer_disconnected(
+    hass: HomeAssistant, freezer: FrozenDateTimeFactory
+) -> None:
     """Test the underlying sensors."""
     job = {
         "job": {},
         "progress": {"completion": 50, "printTime": 600, "printTimeLeft": 6000},
         "state": "Paused",
     }
-    with patch(
-        "homeassistant.util.dt.utcnow", return_value=datetime(2020, 2, 20, 9, 10, 0)
-    ):
-        await init_integration(hass, "sensor", printer=None, job=job)
+    freezer.move_to(datetime(2020, 2, 20, 9, 10, 0))
+    await init_integration(hass, "sensor", printer=None, job=job)
 
     entity_registry = er.async_get(hass)
 

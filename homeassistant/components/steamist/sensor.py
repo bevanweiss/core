@@ -13,7 +13,7 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import TEMP_CELSIUS, TEMP_FAHRENHEIT, TIME_MINUTES
+from homeassistant.const import UnitOfTemperature, UnitOfTime
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
@@ -25,19 +25,19 @@ _KEY_MINUTES_REMAIN = "minutes_remain"
 _KEY_TEMP = "temp"
 
 UNIT_MAPPINGS = {
-    "C": TEMP_CELSIUS,
-    "F": TEMP_FAHRENHEIT,
+    "C": UnitOfTemperature.CELSIUS,
+    "F": UnitOfTemperature.FAHRENHEIT,
 }
 
 
-@dataclass
+@dataclass(frozen=True)
 class SteamistSensorEntityDescriptionMixin:
     """Mixin for required keys."""
 
     value_fn: Callable[[SteamistStatus], int | None]
 
 
-@dataclass
+@dataclass(frozen=True)
 class SteamistSensorEntityDescription(
     SensorEntityDescription, SteamistSensorEntityDescriptionMixin
 ):
@@ -47,13 +47,13 @@ class SteamistSensorEntityDescription(
 SENSORS: tuple[SteamistSensorEntityDescription, ...] = (
     SteamistSensorEntityDescription(
         key=_KEY_MINUTES_REMAIN,
-        name="Steam Minutes Remain",
-        native_unit_of_measurement=TIME_MINUTES,
+        translation_key="steam_minutes_remain",
+        native_unit_of_measurement=UnitOfTime.MINUTES,
         value_fn=lambda status: status.minutes_remain,
     ),
     SteamistSensorEntityDescription(
         key=_KEY_TEMP,
-        name="Steam Temperature",
+        translation_key="steam_temperature",
         device_class=SensorDeviceClass.TEMPERATURE,
         state_class=SensorStateClass.MEASUREMENT,
         value_fn=lambda status: status.temp,
@@ -79,7 +79,7 @@ async def async_setup_entry(
 
 
 class SteamistSensorEntity(SteamistEntity, SensorEntity):
-    """Representation of an Steamist steam switch."""
+    """Representation of a Steamist steam switch."""
 
     entity_description: SteamistSensorEntityDescription
 

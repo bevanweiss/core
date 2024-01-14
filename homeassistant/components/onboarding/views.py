@@ -3,17 +3,20 @@ from __future__ import annotations
 
 import asyncio
 from http import HTTPStatus
+from typing import cast
 
+from aiohttp import web
 from aiohttp.web_exceptions import HTTPUnauthorized
 import voluptuous as vol
 
 from homeassistant.auth.const import GROUP_ID_ADMIN
+from homeassistant.auth.providers.homeassistant import HassAuthProvider
 from homeassistant.components import person
 from homeassistant.components.auth import indieauth
-from homeassistant.components.http.const import KEY_HASS_REFRESH_TOKEN_ID
+from homeassistant.components.http import KEY_HASS_REFRESH_TOKEN_ID
 from homeassistant.components.http.data_validator import RequestDataValidator
 from homeassistant.components.http.view import HomeAssistantView
-from homeassistant.core import callback
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import area_registry as ar
 from homeassistant.helpers.system_info import async_get_system_info
 from homeassistant.helpers.translation import async_get_translations
@@ -123,9 +126,9 @@ class UserOnboardingView(_BaseOnboardingView):
             }
         )
     )
-    async def post(self, request, data):
+    async def post(self, request: web.Request, data: dict[str, str]) -> web.Response:
         """Handle user creation, area creation."""
-        hass = request.app["hass"]
+        hass: HomeAssistant = request.app["hass"]
 
         async with self._lock:
             if self._async_is_done():
@@ -137,13 +140,10 @@ class UserOnboardingView(_BaseOnboardingView):
             user = await hass.auth.async_create_user(
                 data["name"], group_ids=[GROUP_ID_ADMIN]
             )
-            await hass.async_add_executor_job(
-                provider.data.add_auth, data["username"], data["password"]
-            )
+            await provider.async_add_auth(data["username"], data["password"])
             credentials = await provider.async_get_or_create_credentials(
                 {"username": data["username"]}
             )
-            await provider.data.async_save()
             await hass.auth.async_link_user(user, credentials)
             if "person" in hass.config.components:
                 await person.async_create_person(hass, data["name"], user_id=user.id)
@@ -166,7 +166,7 @@ class UserOnboardingView(_BaseOnboardingView):
 
             # Return authorization code for fetching tokens and connect
             # during onboarding.
-            # pylint: disable=import-outside-toplevel
+            # pylint: disable-next=import-outside-toplevel
             from homeassistant.components.auth import create_auth_code
 
             auth_code = create_auth_code(hass, data["client_id"], credentials)
@@ -193,9 +193,14 @@ class CoreConfigOnboardingView(_BaseOnboardingView):
             await self._async_mark_done(hass)
 
             # Integrations to set up when finishing onboarding
-            onboard_integrations = ["met", "radio_browser"]
+            onboard_integrations = [
+                "google_translate",
+                "met",
+                "radio_browser",
+                "shopping_list",
+            ]
 
-            # pylint: disable=import-outside-toplevel
+            # pylint: disable-next=import-outside-toplevel
             from homeassistant.components import hassio
 
             if (
@@ -255,7 +260,7 @@ class IntegrationOnboardingView(_BaseOnboardingView):
                 )
 
             # Return authorization code so we can redirect user and log them in
-            # pylint: disable=import-outside-toplevel
+            # pylint: disable-next=import-outside-toplevel
             from homeassistant.components.auth import create_auth_code
 
             auth_code = create_auth_code(
@@ -287,10 +292,10 @@ class AnalyticsOnboardingView(_BaseOnboardingView):
 
 
 @callback
-def _async_get_hass_provider(hass):
+def _async_get_hass_provider(hass: HomeAssistant) -> HassAuthProvider:
     """Get the Home Assistant auth provider."""
     for prv in hass.auth.auth_providers:
         if prv.type == "homeassistant":
-            return prv
+            return cast(HassAuthProvider, prv)
 
     raise RuntimeError("No Home Assistant provider found")

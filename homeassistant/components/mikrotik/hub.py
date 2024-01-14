@@ -1,7 +1,7 @@
 """The Mikrotik router class."""
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import timedelta
 import logging
 import socket
 import ssl
@@ -13,13 +13,11 @@ from librouteros.login import plain as login_plain, token as login_token
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_USERNAME, CONF_VERIFY_SSL
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
-from homeassistant.util import slugify
-import homeassistant.util.dt as dt_util
 
 from .const import (
     ARP,
-    ATTR_DEVICE_TRACKER,
     ATTR_FIRMWARE,
     ATTR_MODEL,
     ATTR_SERIAL_NUMBER,
@@ -33,69 +31,19 @@ from .const import (
     IDENTITY,
     INFO,
     IS_CAPSMAN,
+    IS_WIFI,
+    IS_WIFIWAVE2,
     IS_WIRELESS,
     MIKROTIK_SERVICES,
     NAME,
+    WIFI,
+    WIFIWAVE2,
     WIRELESS,
 )
+from .device import Device
 from .errors import CannotConnect, LoginError
 
 _LOGGER = logging.getLogger(__name__)
-
-
-class Device:
-    """Represents a network device."""
-
-    def __init__(self, mac: str, params: dict[str, Any]) -> None:
-        """Initialize the network device."""
-        self._mac = mac
-        self._params = params
-        self._last_seen: datetime | None = None
-        self._attrs: dict[str, Any] = {}
-        self._wireless_params: dict[str, Any] = {}
-
-    @property
-    def name(self) -> str:
-        """Return device name."""
-        return self._params.get("host-name", self.mac)
-
-    @property
-    def ip_address(self) -> str:
-        """Return device primary ip address."""
-        return self._params["address"]
-
-    @property
-    def mac(self) -> str:
-        """Return device mac."""
-        return self._mac
-
-    @property
-    def last_seen(self) -> datetime | None:
-        """Return device last seen."""
-        return self._last_seen
-
-    @property
-    def attrs(self) -> dict[str, Any]:
-        """Return device attributes."""
-        attr_data = self._wireless_params | self._params
-        for attr in ATTR_DEVICE_TRACKER:
-            if attr in attr_data:
-                self._attrs[slugify(attr)] = attr_data[attr]
-        return self._attrs
-
-    def update(
-        self,
-        wireless_params: dict[str, Any] | None = None,
-        params: dict[str, Any] | None = None,
-        active: bool = False,
-    ) -> None:
-        """Update Device params."""
-        if wireless_params:
-            self._wireless_params = wireless_params
-        if params:
-            self._params = params
-        if active:
-            self._last_seen = dt_util.utcnow()
 
 
 class MikrotikData:
@@ -113,6 +61,8 @@ class MikrotikData:
         self.devices: dict[str, Device] = {}
         self.support_capsman: bool = False
         self.support_wireless: bool = False
+        self.support_wifiwave2: bool = False
+        self.support_wifi: bool = False
         self.hostname: str = ""
         self.model: str = ""
         self.firmware: str = ""
@@ -141,7 +91,7 @@ class MikrotikData:
     def get_info(self, param: str) -> str:
         """Return device model name."""
         cmd = IDENTITY if param == NAME else INFO
-        if data := self.command(MIKROTIK_SERVICES[cmd]):
+        if data := self.command(MIKROTIK_SERVICES[cmd], suppress_errors=(cmd == INFO)):
             return str(data[0].get(param))
         return ""
 
@@ -151,8 +101,18 @@ class MikrotikData:
         self.model = self.get_info(ATTR_MODEL)
         self.firmware = self.get_info(ATTR_FIRMWARE)
         self.serial_number = self.get_info(ATTR_SERIAL_NUMBER)
-        self.support_capsman = bool(self.command(MIKROTIK_SERVICES[IS_CAPSMAN]))
-        self.support_wireless = bool(self.command(MIKROTIK_SERVICES[IS_WIRELESS]))
+        self.support_capsman = bool(
+            self.command(MIKROTIK_SERVICES[IS_CAPSMAN], suppress_errors=True)
+        )
+        self.support_wireless = bool(
+            self.command(MIKROTIK_SERVICES[IS_WIRELESS], suppress_errors=True)
+        )
+        self.support_wifiwave2 = bool(
+            self.command(MIKROTIK_SERVICES[IS_WIFIWAVE2], suppress_errors=True)
+        )
+        self.support_wifi = bool(
+            self.command(MIKROTIK_SERVICES[IS_WIFI], suppress_errors=True)
+        )
 
     def get_list_from_interface(self, interface: str) -> dict[str, dict[str, Any]]:
         """Get devices from interface."""
@@ -177,6 +137,12 @@ class MikrotikData:
             elif self.support_wireless:
                 _LOGGER.debug("Hub supports wireless Interface")
                 device_list = wireless_devices = self.get_list_from_interface(WIRELESS)
+            elif self.support_wifiwave2:
+                _LOGGER.debug("Hub supports wifiwave2 Interface")
+                device_list = wireless_devices = self.get_list_from_interface(WIFIWAVE2)
+            elif self.support_wifi:
+                _LOGGER.debug("Hub supports wifi Interface")
+                device_list = wireless_devices = self.get_list_from_interface(WIFI)
 
             if not device_list or self.force_dhcp:
                 device_list = self.all_devices
@@ -189,8 +155,10 @@ class MikrotikData:
             # get new hub firmware version if updated
             self.firmware = self.get_info(ATTR_FIRMWARE)
 
-        except (CannotConnect, LoginError) as err:
+        except CannotConnect as err:
             raise UpdateFailed from err
+        except LoginError as err:
+            raise ConfigEntryAuthFailed from err
 
         if not device_list:
             return
@@ -245,11 +213,14 @@ class MikrotikData:
         return True
 
     def command(
-        self, cmd: str, params: dict[str, Any] | None = None
+        self,
+        cmd: str,
+        params: dict[str, Any] | None = None,
+        suppress_errors: bool = False,
     ) -> list[dict[str, Any]]:
         """Retrieve data from Mikrotik API."""
+        _LOGGER.debug("Running command %s", cmd)
         try:
-            _LOGGER.debug("Running command %s", cmd)
             if params:
                 return list(self.api(cmd=cmd, **params))
             return list(self.api(cmd=cmd))
@@ -264,16 +235,15 @@ class MikrotikData:
             # we still have to raise CannotConnect to fail the update.
             raise CannotConnect from api_error
         except librouteros.exceptions.ProtocolError as api_error:
-            _LOGGER.warning(
-                "Mikrotik %s failed to retrieve data. cmd=[%s] Error: %s",
-                self._host,
-                cmd,
-                api_error,
-            )
+            emsg = "Mikrotik %s failed to retrieve data. cmd=[%s] Error: %s"
+            if suppress_errors and "no such command prefix" in str(api_error):
+                _LOGGER.debug(emsg, self._host, cmd, api_error)
+                return []
+            _LOGGER.warning(emsg, self._host, cmd, api_error)
             return []
 
 
-class MikrotikDataUpdateCoordinator(DataUpdateCoordinator):
+class MikrotikDataUpdateCoordinator(DataUpdateCoordinator[None]):
     """Mikrotik Hub Object."""
 
     def __init__(
@@ -293,7 +263,7 @@ class MikrotikDataUpdateCoordinator(DataUpdateCoordinator):
     @property
     def host(self) -> str:
         """Return the host of this hub."""
-        return self.config_entry.data[CONF_HOST]
+        return str(self.config_entry.data[CONF_HOST])
 
     @property
     def hostname(self) -> str:

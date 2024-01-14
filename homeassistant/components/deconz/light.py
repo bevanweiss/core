@@ -1,7 +1,7 @@
 """Support for deCONZ lights."""
 from __future__ import annotations
 
-from typing import Any, Generic, TypedDict, TypeVar
+from typing import Any, TypedDict, TypeVar
 
 from pydeconz.interfaces.groups import GroupHandler
 from pydeconz.interfaces.lights import LightHandler
@@ -29,7 +29,7 @@ from homeassistant.components.light import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import entity_registry as er
-from homeassistant.helpers.entity import DeviceInfo
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.util.color import color_hs_to_xy
 
@@ -38,7 +38,27 @@ from .deconz_device import DeconzDevice
 from .gateway import DeconzGateway, get_gateway_from_config_entry
 
 DECONZ_GROUP = "is_deconz_group"
-EFFECT_TO_DECONZ = {EFFECT_COLORLOOP: LightEffect.COLOR_LOOP, "None": LightEffect.NONE}
+EFFECT_TO_DECONZ = {
+    EFFECT_COLORLOOP: LightEffect.COLOR_LOOP,
+    "None": LightEffect.NONE,
+    # Specific to Lidl christmas light
+    "carnival": LightEffect.CARNIVAL,
+    "collide": LightEffect.COLLIDE,
+    "fading": LightEffect.FADING,
+    "fireworks": LightEffect.FIREWORKS,
+    "flag": LightEffect.FLAG,
+    "glow": LightEffect.GLOW,
+    "rainbow": LightEffect.RAINBOW,
+    "snake": LightEffect.SNAKE,
+    "snow": LightEffect.SNOW,
+    "sparkles": LightEffect.SPARKLES,
+    "steady": LightEffect.STEADY,
+    "strobe": LightEffect.STROBE,
+    "twinkle": LightEffect.TWINKLE,
+    "updown": LightEffect.UPDOWN,
+    "vintage": LightEffect.VINTAGE,
+    "waves": LightEffect.WAVES,
+}
 FLASH_TO_DECONZ = {FLASH_SHORT: LightAlert.SHORT, FLASH_LONG: LightAlert.LONG}
 
 DECONZ_TO_COLOR_MODE = {
@@ -47,7 +67,26 @@ DECONZ_TO_COLOR_MODE = {
     LightColorMode.XY: ColorMode.XY,
 }
 
-_L = TypeVar("_L", Group, Light)
+XMAS_LIGHT_EFFECTS = [
+    "carnival",
+    "collide",
+    "fading",
+    "fireworks",
+    "flag",
+    "glow",
+    "rainbow",
+    "snake",
+    "snow",
+    "sparkles",
+    "steady",
+    "strobe",
+    "twinkle",
+    "updown",
+    "vintage",
+    "waves",
+]
+
+_LightDeviceT = TypeVar("_LightDeviceT", bound=Group | Light)
 
 
 class SetStateAttributes(TypedDict, total=False):
@@ -121,14 +160,12 @@ async def async_setup_entry(
     )
 
 
-class DeconzBaseLight(Generic[_L], DeconzDevice, LightEntity):
+class DeconzBaseLight(DeconzDevice[_LightDeviceT], LightEntity):
     """Representation of a deCONZ light."""
 
     TYPE = DOMAIN
 
-    _device: _L
-
-    def __init__(self, device: _L, gateway: DeconzGateway) -> None:
+    def __init__(self, device: _LightDeviceT, gateway: DeconzGateway) -> None:
         """Set up light."""
         super().__init__(device, gateway)
 
@@ -156,12 +193,15 @@ class DeconzBaseLight(Generic[_L], DeconzDevice, LightEntity):
             self._attr_supported_color_modes.add(ColorMode.ONOFF)
 
         if device.brightness is not None:
-            self._attr_supported_features |= LightEntityFeature.FLASH
-            self._attr_supported_features |= LightEntityFeature.TRANSITION
+            self._attr_supported_features |= (
+                LightEntityFeature.FLASH | LightEntityFeature.TRANSITION
+            )
 
         if device.effect is not None:
             self._attr_supported_features |= LightEntityFeature.EFFECT
             self._attr_effect_list = [EFFECT_COLORLOOP]
+            if device.model_id in ("HG06467", "TS0601"):
+                self._attr_effect_list = XMAS_LIGHT_EFFECTS
 
     @property
     def color_mode(self) -> str | None:
@@ -261,8 +301,6 @@ class DeconzBaseLight(Generic[_L], DeconzDevice, LightEntity):
 class DeconzLight(DeconzBaseLight[Light]):
     """Representation of a deCONZ light."""
 
-    _device: Light
-
     @property
     def max_mireds(self) -> int:
         """Return the warmest color_temp that this light supports."""
@@ -288,8 +326,6 @@ class DeconzGroup(DeconzBaseLight[Group]):
     """Representation of a deCONZ group."""
 
     _attr_has_entity_name = True
-
-    _device: Group
 
     def __init__(self, device: Group, gateway: DeconzGateway) -> None:
         """Set up group and create an unique id."""

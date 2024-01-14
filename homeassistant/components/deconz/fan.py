@@ -49,11 +49,10 @@ async def async_setup_entry(
     )
 
 
-class DeconzFan(DeconzDevice, FanEntity):
+class DeconzFan(DeconzDevice[Light], FanEntity):
     """Representation of a deCONZ fan."""
 
     TYPE = DOMAIN
-    _device: Light
     _default_on_speed = LightFanSpeed.PERCENT_50
 
     _attr_supported_features = FanEntityFeature.SET_SPEED
@@ -61,7 +60,7 @@ class DeconzFan(DeconzDevice, FanEntity):
     def __init__(self, device: Light, gateway: DeconzGateway) -> None:
         """Set up fan."""
         super().__init__(device, gateway)
-
+        _attr_speed_count = len(ORDERED_NAMED_FAN_SPEEDS)
         if device.fan_speed in ORDERED_NAMED_FAN_SPEEDS:
             self._default_on_speed = device.fan_speed
 
@@ -80,11 +79,6 @@ class DeconzFan(DeconzDevice, FanEntity):
         return ordered_list_item_to_percentage(
             ORDERED_NAMED_FAN_SPEEDS, self._device.fan_speed
         )
-
-    @property
-    def speed_count(self) -> int:
-        """Return the number of speeds the fan supports."""
-        return len(ORDERED_NAMED_FAN_SPEEDS)
 
     @callback
     def async_update_callback(self) -> None:

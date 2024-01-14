@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Coroutine, Iterable
 from datetime import timedelta
 from typing import Any, cast
 
@@ -66,11 +66,11 @@ from homeassistant.helpers import (
     config_validation as cv,
     device_registry as dr,
 )
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.dispatcher import (
     async_dispatcher_connect,
     async_dispatcher_send,
 )
-from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.service import (
     async_register_admin_service,
     verify_domain_control,
@@ -126,6 +126,7 @@ EVENT_SIMPLISAFE_NOTIFICATION = "SIMPLISAFE_NOTIFICATION"
 PLATFORMS = [
     Platform.ALARM_CONTROL_PANEL,
     Platform.BINARY_SENSOR,
+    Platform.BUTTON,
     Platform.LOCK,
     Platform.SENSOR,
 ]
@@ -137,22 +138,14 @@ VOLUME_MAP = {
     "off": Volume.OFF,
 }
 
-SERVICE_NAME_CLEAR_NOTIFICATIONS = "clear_notifications"
 SERVICE_NAME_REMOVE_PIN = "remove_pin"
 SERVICE_NAME_SET_PIN = "set_pin"
 SERVICE_NAME_SET_SYSTEM_PROPERTIES = "set_system_properties"
 
 SERVICES = (
-    SERVICE_NAME_CLEAR_NOTIFICATIONS,
     SERVICE_NAME_REMOVE_PIN,
     SERVICE_NAME_SET_PIN,
     SERVICE_NAME_SET_SYSTEM_PROPERTIES,
-)
-
-SERVICE_CLEAR_NOTIFICATIONS_SCHEMA = vol.Schema(
-    {
-        vol.Required(ATTR_DEVICE_ID): cv.string,
-    },
 )
 
 SERVICE_REMOVE_PIN_SCHEMA = vol.Schema(
@@ -243,11 +236,12 @@ def _async_get_system_for_service_call(
     ) is None:
         raise ValueError("No base station registered for alarm control panel")
 
-    [system_id] = [
+    [system_id_str] = [
         identity[1]
         for identity in base_station_device_entry.identifiers
         if identity[0] == DOMAIN
     ]
+    system_id = int(system_id_str)
 
     for entry_id in base_station_device_entry.config_entries:
         if (simplisafe := hass.data[DOMAIN].get(entry_id)) is None:
@@ -263,13 +257,28 @@ def _async_register_base_station(
 ) -> None:
     """Register a new bridge."""
     device_registry = dr.async_get(hass)
-    device_registry.async_get_or_create(
+
+    base_station = device_registry.async_get_or_create(
         config_entry_id=entry.entry_id,
-        identifiers={(DOMAIN, system.system_id)},
+        identifiers={(DOMAIN, str(system.system_id))},
         manufacturer="SimpliSafe",
         model=system.version,
         name=system.address,
     )
+
+    # Check for an old system ID format and remove it:
+    if old_base_station := device_registry.async_get_device(
+        identifiers={(DOMAIN, system.system_id)}  # type: ignore[arg-type]
+    ):
+        # Update the new base station with any properties the user might have configured
+        # on the old base station:
+        device_registry.async_update_device(
+            base_station.id,
+            area_id=old_base_station.area_id,
+            disabled_by=old_base_station.disabled_by,
+            name_by_user=old_base_station.name_by_user,
+        )
+        device_registry.async_remove_device(old_base_station.id)
 
 
 @callback
@@ -277,10 +286,8 @@ def _async_standardize_config_entry(hass: HomeAssistant, entry: ConfigEntry) -> 
     """Bring a config entry up to current standards."""
     if CONF_TOKEN not in entry.data:
         raise ConfigEntryAuthFailed(
-            "New SimpliSafe OAuth standard requires re-authentication"
+            "SimpliSafe OAuth standard requires re-authentication"
         )
-    if CONF_USERNAME not in entry.data:
-        raise ConfigEntryAuthFailed("Need to re-auth with username/password")
 
     entry_updates = {}
     if not entry.unique_id:
@@ -329,7 +336,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     @callback
-    def extract_system(func: Callable) -> Callable:
+    def extract_system(
+        func: Callable[[ServiceCall, SystemType], Coroutine[Any, Any, None]],
+    ) -> Callable[[ServiceCall], Coroutine[Any, Any, None]]:
         """Define a decorator to get the correct system for a service call."""
 
         async def wrapper(call: ServiceCall) -> None:
@@ -344,12 +353,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 ) from err
 
         return wrapper
-
-    @_verify_domain_control
-    @extract_system
-    async def async_clear_notifications(call: ServiceCall, system: SystemType) -> None:
-        """Clear all active notifications."""
-        await system.async_clear_notifications()
 
     @_verify_domain_control
     @extract_system
@@ -377,11 +380,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
 
     for service, method, schema in (
-        (
-            SERVICE_NAME_CLEAR_NOTIFICATIONS,
-            async_clear_notifications,
-            SERVICE_CLEAR_NOTIFICATIONS_SCHEMA,
-        ),
         (SERVICE_NAME_REMOVE_PIN, async_remove_pin, SERVICE_REMOVE_PIN_SCHEMA),
         (SERVICE_NAME_SET_PIN, async_set_pin, SERVICE_SET_PIN_SCHEMA),
         (
@@ -453,12 +451,12 @@ class SimpliSafe:
         self.systems: dict[int, SystemType] = {}
 
         # This will get filled in by async_init:
-        self.coordinator: DataUpdateCoordinator | None = None
+        self.coordinator: DataUpdateCoordinator[None] | None = None
 
     @callback
     def _async_process_new_notifications(self, system: SystemType) -> None:
         """Act on any new system notifications."""
-        if self._hass.state != CoreState.running:
+        if self._hass.state is not CoreState.running:
             # If HASS isn't fully running yet, it may cause the SIMPLISAFE_NOTIFICATION
             # event to fire before dependent components (like automation) are fully
             # ready. If that's the case, skip:
@@ -656,7 +654,7 @@ class SimpliSafe:
                 raise UpdateFailed(f"SimpliSafe error while updating: {result}")
 
 
-class SimpliSafeEntity(CoordinatorEntity):
+class SimpliSafeEntity(CoordinatorEntity[DataUpdateCoordinator[None]]):
     """Define a base SimpliSafe entity."""
 
     _attr_has_entity_name = True
@@ -711,7 +709,7 @@ class SimpliSafeEntity(CoordinatorEntity):
             manufacturer="SimpliSafe",
             model=model,
             name=device_name,
-            via_device=(DOMAIN, system.system_id),
+            via_device=(DOMAIN, str(system.system_id)),
         )
 
         self._attr_unique_id = serial
@@ -841,9 +839,7 @@ class SimpliSafeEntity(CoordinatorEntity):
     @callback
     def async_update_from_rest_api(self) -> None:
         """Update the entity when new data comes from the REST API."""
-        raise NotImplementedError()
 
     @callback
     def async_update_from_websocket_event(self, event: WebsocketEvent) -> None:
         """Update the entity when new data comes from the websocket."""
-        raise NotImplementedError()

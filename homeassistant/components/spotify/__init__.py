@@ -13,7 +13,6 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
-from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.config_entry_oauth2_flow import (
     OAuth2Session,
     async_get_config_entry_implementation,
@@ -28,7 +27,6 @@ from .util import (
     spotify_uri_from_media_browser_url,
 )
 
-CONFIG_SCHEMA = cv.removed(DOMAIN, raise_if_present=False)
 PLATFORMS = [Platform.MEDIA_PLAYER]
 
 
@@ -47,7 +45,7 @@ class HomeAssistantSpotifyData:
 
     client: Spotify
     current_user: dict[str, Any]
-    devices: DataUpdateCoordinator
+    devices: DataUpdateCoordinator[list[dict[str, Any]]]
     session: OAuth2Session
 
 

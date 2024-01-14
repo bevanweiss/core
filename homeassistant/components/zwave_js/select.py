@@ -5,15 +5,15 @@ from typing import cast
 
 from zwave_js_server.client import Client as ZwaveClient
 from zwave_js_server.const import TARGET_VALUE_PROPERTY, CommandClass
-from zwave_js_server.const.command_class.sound_switch import ToneID
+from zwave_js_server.const.command_class.lock import TARGET_MODE_PROPERTY
+from zwave_js_server.const.command_class.sound_switch import TONE_ID_PROPERTY, ToneID
 from zwave_js_server.model.driver import Driver
 
 from homeassistant.components.select import DOMAIN as SELECT_DOMAIN, SelectEntity
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
-from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DATA_CLIENT, DOMAIN
@@ -43,6 +43,12 @@ async def async_setup_entry(
             entities.append(
                 ZwaveMultilevelSwitchSelectEntity(config_entry, driver, info)
             )
+        elif info.platform_hint == "config_parameter":
+            entities.append(
+                ZWaveConfigParameterSelectEntity(config_entry, driver, info)
+            )
+        elif info.platform_hint == "door_lock":
+            entities.append(ZWaveDoorLockSelectEntity(config_entry, driver, info))
         else:
             entities.append(ZwaveSelectEntity(config_entry, driver, info))
         async_add_entities(entities)
@@ -82,14 +88,54 @@ class ZwaveSelectEntity(ZWaveBaseEntity, SelectEntity):
             )
         )
 
-    async def async_select_option(self, option: str | int) -> None:
+    async def async_select_option(self, option: str) -> None:
         """Change the selected option."""
         key = next(
             key
             for key, val in self.info.primary_value.metadata.states.items()
             if val == option
         )
-        await self.info.node.async_set_value(self.info.primary_value, int(key))
+        await self._async_set_value(self.info.primary_value, int(key))
+
+
+class ZWaveDoorLockSelectEntity(ZwaveSelectEntity):
+    """Representation of a Z-Wave door lock CC mode select entity."""
+
+    def __init__(
+        self, config_entry: ConfigEntry, driver: Driver, info: ZwaveDiscoveryInfo
+    ) -> None:
+        """Initialize a ZWaveDoorLockSelectEntity entity."""
+        super().__init__(config_entry, driver, info)
+        self._target_value = self.get_zwave_value(TARGET_MODE_PROPERTY)
+
+    async def async_select_option(self, option: str) -> None:
+        """Change the selected option."""
+        assert self._target_value is not None
+        key = next(
+            key
+            for key, val in self.info.primary_value.metadata.states.items()
+            if val == option
+        )
+        await self._async_set_value(self._target_value, int(key))
+
+
+class ZWaveConfigParameterSelectEntity(ZwaveSelectEntity):
+    """Representation of a Z-Wave config parameter select."""
+
+    _attr_entity_category = EntityCategory.CONFIG
+
+    def __init__(
+        self, config_entry: ConfigEntry, driver: Driver, info: ZwaveDiscoveryInfo
+    ) -> None:
+        """Initialize a ZWaveConfigParameterSelect entity."""
+        super().__init__(config_entry, driver, info)
+
+        property_key_name = self.info.primary_value.property_key_name
+        # Entity class attributes
+        self._attr_name = self.generate_name(
+            alternate_value_name=self.info.primary_value.property_name,
+            additional_info=[property_key_name] if property_key_name else None,
+        )
 
 
 class ZwaveDefaultToneSelectEntity(ZWaveBaseEntity, SelectEntity):
@@ -103,13 +149,11 @@ class ZwaveDefaultToneSelectEntity(ZWaveBaseEntity, SelectEntity):
         """Initialize a ZwaveDefaultToneSelectEntity entity."""
         super().__init__(config_entry, driver, info)
         self._tones_value = self.get_zwave_value(
-            "toneId", command_class=CommandClass.SOUND_SWITCH
+            TONE_ID_PROPERTY, command_class=CommandClass.SOUND_SWITCH
         )
 
         # Entity class attributes
-        self._attr_name = self.generate_name(
-            include_value_name=True, alternate_value_name=info.platform_hint
-        )
+        self._attr_name = self.generate_name(alternate_value_name=info.platform_hint)
 
     @property
     def options(self) -> list[str]:
@@ -133,7 +177,7 @@ class ZwaveDefaultToneSelectEntity(ZWaveBaseEntity, SelectEntity):
             )
         )
 
-    async def async_select_option(self, option: str | int) -> None:
+    async def async_select_option(self, option: str) -> None:
         """Change the selected option."""
         # We know we can assert because this value is part of the discovery schema
         assert self._tones_value
@@ -142,7 +186,7 @@ class ZwaveDefaultToneSelectEntity(ZWaveBaseEntity, SelectEntity):
             for key, val in self._tones_value.metadata.states.items()
             if val == option
         )
-        await self.info.node.async_set_value(self.info.primary_value, int(key))
+        await self._async_set_value(self.info.primary_value, int(key))
 
 
 class ZwaveMultilevelSwitchSelectEntity(ZWaveBaseEntity, SelectEntity):
@@ -175,7 +219,6 @@ class ZwaveMultilevelSwitchSelectEntity(ZWaveBaseEntity, SelectEntity):
 
     async def async_select_option(self, option: str) -> None:
         """Change the selected option."""
-        if (target_value := self._target_value) is None:
-            raise HomeAssistantError("Missing target value on device.")
+        assert self._target_value is not None
         key = next(key for key, val in self._lookup_map.items() if val == option)
-        await self.info.node.async_set_value(target_value, int(key))
+        await self._async_set_value(self._target_value, int(key))

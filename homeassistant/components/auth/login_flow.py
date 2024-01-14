@@ -66,14 +66,19 @@ associate with an credential if "type" set to "link_user" in
     "version": 1
 }
 """
+from __future__ import annotations
+
+from collections.abc import Callable
 from http import HTTPStatus
 from ipaddress import ip_address
+from typing import TYPE_CHECKING, Any, cast
 
 from aiohttp import web
 import voluptuous as vol
 import voluptuous_serialize
 
 from homeassistant import data_entry_flow
+from homeassistant.auth import AuthManagerFlowManager, InvalidAuthError
 from homeassistant.auth.models import Credentials
 from homeassistant.components import onboarding
 from homeassistant.components.http.auth import async_user_not_allowed_do_auth
@@ -85,15 +90,49 @@ from homeassistant.components.http.ban import (
 from homeassistant.components.http.data_validator import RequestDataValidator
 from homeassistant.components.http.view import HomeAssistantView
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.network import is_cloud_connection
+from homeassistant.util.network import is_local
 
 from . import indieauth
 
+if TYPE_CHECKING:
+    from homeassistant.auth.providers.trusted_networks import (
+        TrustedNetworksAuthProvider,
+    )
 
-async def async_setup(hass, store_result):
+    from . import StoreResultType
+
+
+async def async_setup(
+    hass: HomeAssistant, store_result: Callable[[str, Credentials], str]
+) -> None:
     """Component to allow users to login."""
+    hass.http.register_view(WellKnownOAuthInfoView)
     hass.http.register_view(AuthProvidersView)
     hass.http.register_view(LoginFlowIndexView(hass.auth.login_flow, store_result))
     hass.http.register_view(LoginFlowResourceView(hass.auth.login_flow, store_result))
+
+
+class WellKnownOAuthInfoView(HomeAssistantView):
+    """View to host the OAuth2 information."""
+
+    requires_auth = False
+    url = "/.well-known/oauth-authorization-server"
+    name = "well-known/oauth-authorization-server"
+
+    async def get(self, request: web.Request) -> web.Response:
+        """Return the well known OAuth2 authorization info."""
+        return self.json(
+            {
+                "authorization_endpoint": "/auth/authorize",
+                "token_endpoint": "/auth/token",
+                "revocation_endpoint": "/auth/revoke",
+                "response_types_supported": ["code"],
+                "service_documentation": (
+                    "https://developers.home-assistant.io/docs/auth_api"
+                ),
+            }
+        )
 
 
 class AuthProvidersView(HomeAssistantView):
@@ -103,9 +142,9 @@ class AuthProvidersView(HomeAssistantView):
     name = "api:auth:providers"
     requires_auth = False
 
-    async def get(self, request):
+    async def get(self, request: web.Request) -> web.Response:
         """Get available auth providers."""
-        hass = request.app["hass"]
+        hass: HomeAssistant = request.app["hass"]
         if not onboarding.async_is_user_onboarded(hass):
             return self.json_message(
                 message="Onboarding not finished",
@@ -113,15 +152,53 @@ class AuthProvidersView(HomeAssistantView):
                 message_code="onboarding_required",
             )
 
+        try:
+            remote_address = ip_address(request.remote)  # type: ignore[arg-type]
+        except ValueError:
+            return self.json_message(
+                message="Invalid remote IP",
+                status_code=HTTPStatus.BAD_REQUEST,
+                message_code="invalid_remote_ip",
+            )
+
+        cloud_connection = is_cloud_connection(hass)
+
+        providers = []
+        for provider in hass.auth.auth_providers:
+            if provider.type == "trusted_networks":
+                if cloud_connection:
+                    # Skip quickly as trusted networks are not available on cloud
+                    continue
+
+                try:
+                    cast("TrustedNetworksAuthProvider", provider).async_validate_access(
+                        remote_address
+                    )
+                except InvalidAuthError:
+                    # Not a trusted network, so we don't expose that trusted_network authenticator is setup
+                    continue
+
+            providers.append(
+                {
+                    "name": provider.name,
+                    "id": provider.id,
+                    "type": provider.type,
+                }
+            )
+
+        preselect_remember_me = not cloud_connection and is_local(remote_address)
+
         return self.json(
-            [
-                {"name": provider.name, "id": provider.id, "type": provider.type}
-                for provider in hass.auth.auth_providers
-            ]
+            {
+                "providers": providers,
+                "preselect_remember_me": preselect_remember_me,
+            }
         )
 
 
-def _prepare_result_json(result):
+def _prepare_result_json(
+    result: data_entry_flow.FlowResult,
+) -> data_entry_flow.FlowResult:
     """Convert result to JSON."""
     if result["type"] == data_entry_flow.FlowResultType.CREATE_ENTRY:
         data = result.copy()
@@ -147,12 +224,21 @@ class LoginFlowBaseView(HomeAssistantView):
 
     requires_auth = False
 
-    def __init__(self, flow_mgr, store_result):
+    def __init__(
+        self,
+        flow_mgr: AuthManagerFlowManager,
+        store_result: StoreResultType,
+    ) -> None:
         """Initialize the flow manager index view."""
         self._flow_mgr = flow_mgr
         self._store_result = store_result
 
-    async def _async_flow_result_to_response(self, request, client_id, result):
+    async def _async_flow_result_to_response(
+        self,
+        request: web.Request,
+        client_id: str,
+        result: data_entry_flow.FlowResult,
+    ) -> web.Response:
         """Convert the flow result to a response."""
         if result["type"] != data_entry_flow.FlowResultType.CREATE_ENTRY:
             # @log_invalid_auth does not work here since it returns HTTP 200.
@@ -169,9 +255,16 @@ class LoginFlowBaseView(HomeAssistantView):
                 await process_wrong_login(request)
             return self.json(_prepare_result_json(result))
 
-        result.pop("data")
-
         hass: HomeAssistant = request.app["hass"]
+
+        if not await indieauth.verify_redirect_uri(
+            hass, client_id, result["context"]["redirect_uri"]
+        ):
+            return self.json_message("Invalid redirect URI", HTTPStatus.FORBIDDEN)
+
+        result.pop("data")
+        result.pop("context")
+
         result_obj: Credentials = result.pop("result")
 
         # Result can be None if credential was never linked to a user before.
@@ -184,19 +277,19 @@ class LoginFlowBaseView(HomeAssistantView):
                 f"Login blocked: {user_access_error}", HTTPStatus.FORBIDDEN
             )
 
-        await process_success_login(request)
+        process_success_login(request)
         result["result"] = self._store_result(client_id, result_obj)
 
         return self.json(result)
 
 
 class LoginFlowIndexView(LoginFlowBaseView):
-    """View to create a config flow."""
+    """View to create a login flow."""
 
     url = "/auth/login_flow"
     name = "api:auth:login_flow"
 
-    async def get(self, request):
+    async def get(self, request: web.Request) -> web.Response:
         """Do not allow index of flows in progress."""
         return web.Response(status=HTTPStatus.METHOD_NOT_ALLOWED)
 
@@ -211,15 +304,15 @@ class LoginFlowIndexView(LoginFlowBaseView):
         )
     )
     @log_invalid_auth
-    async def post(self, request, data):
+    async def post(self, request: web.Request, data: dict[str, Any]) -> web.Response:
         """Create a new login flow."""
-        if not await indieauth.verify_redirect_uri(
-            request.app["hass"], data["client_id"], data["redirect_uri"]
-        ):
-            return self.json_message(
-                "invalid client id or redirect uri", HTTPStatus.BAD_REQUEST
-            )
+        client_id: str = data["client_id"]
+        redirect_uri: str = data["redirect_uri"]
 
+        if not indieauth.verify_client_id(client_id):
+            return self.json_message("Invalid client id", HTTPStatus.BAD_REQUEST)
+
+        handler: tuple[str, ...] | str
         if isinstance(data["handler"], list):
             handler = tuple(data["handler"])
         else:
@@ -227,10 +320,11 @@ class LoginFlowIndexView(LoginFlowBaseView):
 
         try:
             result = await self._flow_mgr.async_init(
-                handler,
+                handler,  # type: ignore[arg-type]
                 context={
-                    "ip_address": ip_address(request.remote),
+                    "ip_address": ip_address(request.remote),  # type: ignore[arg-type]
                     "credential_only": data.get("type") == "link_user",
+                    "redirect_uri": redirect_uri,
                 },
             )
         except data_entry_flow.UnknownHandler:
@@ -240,9 +334,7 @@ class LoginFlowIndexView(LoginFlowBaseView):
                 "Handler does not support init", HTTPStatus.BAD_REQUEST
             )
 
-        return await self._async_flow_result_to_response(
-            request, data["client_id"], result
-        )
+        return await self._async_flow_result_to_response(request, client_id, result)
 
 
 class LoginFlowResourceView(LoginFlowBaseView):
@@ -251,15 +343,22 @@ class LoginFlowResourceView(LoginFlowBaseView):
     url = "/auth/login_flow/{flow_id}"
     name = "api:auth:login_flow:resource"
 
-    async def get(self, request):
+    async def get(self, request: web.Request) -> web.Response:
         """Do not allow getting status of a flow in progress."""
         return self.json_message("Invalid flow specified", HTTPStatus.NOT_FOUND)
 
-    @RequestDataValidator(vol.Schema({"client_id": str}, extra=vol.ALLOW_EXTRA))
+    @RequestDataValidator(
+        vol.Schema(
+            {vol.Required("client_id"): str},
+            extra=vol.ALLOW_EXTRA,
+        )
+    )
     @log_invalid_auth
-    async def post(self, request, data, flow_id):
+    async def post(
+        self, request: web.Request, data: dict[str, Any], flow_id: str
+    ) -> web.Response:
         """Handle progressing a login flow request."""
-        client_id = data.pop("client_id")
+        client_id: str = data.pop("client_id")
 
         if not indieauth.verify_client_id(client_id):
             return self.json_message("Invalid client id", HTTPStatus.BAD_REQUEST)
@@ -267,7 +366,7 @@ class LoginFlowResourceView(LoginFlowBaseView):
         try:
             # do not allow change ip during login flow
             flow = self._flow_mgr.async_get(flow_id)
-            if flow["context"]["ip_address"] != ip_address(request.remote):
+            if flow["context"]["ip_address"] != ip_address(request.remote):  # type: ignore[arg-type]
                 return self.json_message("IP address changed", HTTPStatus.BAD_REQUEST)
             result = await self._flow_mgr.async_configure(flow_id, data)
         except data_entry_flow.UnknownFlow:
@@ -277,7 +376,7 @@ class LoginFlowResourceView(LoginFlowBaseView):
 
         return await self._async_flow_result_to_response(request, client_id, result)
 
-    async def delete(self, request, flow_id):
+    async def delete(self, request: web.Request, flow_id: str) -> web.Response:
         """Cancel a flow in progress."""
         try:
             self._flow_mgr.async_abort(flow_id)

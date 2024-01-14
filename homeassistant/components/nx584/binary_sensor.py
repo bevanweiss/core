@@ -87,6 +87,8 @@ def setup_platform(
 class NX584ZoneSensor(BinarySensorEntity):
     """Representation of a NX584 zone as a sensor."""
 
+    _attr_should_poll = False
+
     def __init__(self, zone, zone_type):
         """Initialize the nx594 binary sensor."""
         self._zone = zone
@@ -96,11 +98,6 @@ class NX584ZoneSensor(BinarySensorEntity):
     def device_class(self):
         """Return the class of this sensor, from DEVICE_CLASSES."""
         return self._zone_type
-
-    @property
-    def should_poll(self):
-        """No polling needed."""
-        return False
 
     @property
     def name(self):
@@ -134,9 +131,9 @@ class NX584Watcher(threading.Thread):
 
     def _process_zone_event(self, event):
         zone = event["zone"]
-        # pylint: disable=protected-access
         if not (zone_sensor := self._zone_sensors.get(zone)):
             return
+        # pylint: disable-next=protected-access
         zone_sensor._zone["state"] = event["zone_state"]
         zone_sensor.schedule_update_ha_state()
 

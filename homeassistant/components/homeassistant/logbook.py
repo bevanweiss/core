@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from homeassistant.components.logbook.const import (
+from homeassistant.components.logbook import (
     LOGBOOK_ENTRY_ICON,
     LOGBOOK_ENTRY_MESSAGE,
     LOGBOOK_ENTRY_NAME,
@@ -28,7 +28,7 @@ def async_describe_events(
 
     @callback
     def async_describe_hass_event(event: Event) -> dict[str, str]:
-        """Describe homeassisant logbook event."""
+        """Describe homeassistant logbook event."""
         return {
             LOGBOOK_ENTRY_NAME: "Home Assistant",
             LOGBOOK_ENTRY_MESSAGE: EVENT_TO_NAME[event.event_type],

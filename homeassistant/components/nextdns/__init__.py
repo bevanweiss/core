@@ -7,7 +7,6 @@ import logging
 from typing import TypeVar
 
 from aiohttp.client_exceptions import ClientConnectorError
-from async_timeout import timeout
 from nextdns import (
     AnalyticsDnssec,
     AnalyticsEncryption,
@@ -15,6 +14,7 @@ from nextdns import (
     AnalyticsProtocols,
     AnalyticsStatus,
     ApiError,
+    ConnectionStatus,
     InvalidApiKeyError,
     NextDns,
     Settings,
@@ -26,11 +26,11 @@ from homeassistant.const import CONF_API_KEY, Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
-from homeassistant.helpers.device_registry import DeviceEntryType
-from homeassistant.helpers.entity import DeviceInfo
+from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .const import (
+    ATTR_CONNECTION,
     ATTR_DNSSEC,
     ATTR_ENCRYPTION,
     ATTR_IP_VERSIONS,
@@ -40,13 +40,14 @@ from .const import (
     CONF_PROFILE_ID,
     DOMAIN,
     UPDATE_INTERVAL_ANALYTICS,
+    UPDATE_INTERVAL_CONNECTION,
     UPDATE_INTERVAL_SETTINGS,
 )
 
-TCoordinatorData = TypeVar("TCoordinatorData", bound=NextDnsData)
+CoordinatorDataT = TypeVar("CoordinatorDataT", bound=NextDnsData)
 
 
-class NextDnsUpdateCoordinator(DataUpdateCoordinator[TCoordinatorData]):
+class NextDnsUpdateCoordinator(DataUpdateCoordinator[CoordinatorDataT]):
     """Class to manage fetching NextDNS data API."""
 
     def __init__(
@@ -70,15 +71,15 @@ class NextDnsUpdateCoordinator(DataUpdateCoordinator[TCoordinatorData]):
 
         super().__init__(hass, _LOGGER, name=DOMAIN, update_interval=update_interval)
 
-    async def _async_update_data(self) -> TCoordinatorData:
+    async def _async_update_data(self) -> CoordinatorDataT:
         """Update data via internal method."""
         try:
-            async with timeout(10):
+            async with asyncio.timeout(10):
                 return await self._async_update_data_internal()
         except (ApiError, ClientConnectorError, InvalidApiKeyError) as err:
             raise UpdateFailed(err) from err
 
-    async def _async_update_data_internal(self) -> TCoordinatorData:
+    async def _async_update_data_internal(self) -> CoordinatorDataT:
         """Update data via library."""
         raise NotImplementedError("Update method not implemented")
 
@@ -131,10 +132,19 @@ class NextDnsSettingsUpdateCoordinator(NextDnsUpdateCoordinator[Settings]):
         return await self.nextdns.get_settings(self.profile_id)
 
 
+class NextDnsConnectionUpdateCoordinator(NextDnsUpdateCoordinator[ConnectionStatus]):
+    """Class to manage fetching NextDNS connection data from API."""
+
+    async def _async_update_data_internal(self) -> ConnectionStatus:
+        """Update data via library."""
+        return await self.nextdns.connection_status(self.profile_id)
+
+
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS = [Platform.BUTTON, Platform.SENSOR, Platform.SWITCH]
-COORDINATORS = [
+PLATFORMS = [Platform.BINARY_SENSOR, Platform.BUTTON, Platform.SENSOR, Platform.SWITCH]
+COORDINATORS: list[tuple[str, type[NextDnsUpdateCoordinator], timedelta]] = [
+    (ATTR_CONNECTION, NextDnsConnectionUpdateCoordinator, UPDATE_INTERVAL_CONNECTION),
     (ATTR_DNSSEC, NextDnsDnssecUpdateCoordinator, UPDATE_INTERVAL_ANALYTICS),
     (ATTR_ENCRYPTION, NextDnsEncryptionUpdateCoordinator, UPDATE_INTERVAL_ANALYTICS),
     (ATTR_IP_VERSIONS, NextDnsIpVersionsUpdateCoordinator, UPDATE_INTERVAL_ANALYTICS),
@@ -151,30 +161,26 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     websession = async_get_clientsession(hass)
     try:
-        async with timeout(10):
+        async with asyncio.timeout(10):
             nextdns = await NextDns.create(websession, api_key)
     except (ApiError, ClientConnectorError, asyncio.TimeoutError) as err:
         raise ConfigEntryNotReady from err
 
-    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = {}
-
     tasks = []
+    coordinators = {}
 
     # Independent DataUpdateCoordinator is used for each API endpoint to avoid
     # unnecessary requests when entities using this endpoint are disabled.
     for coordinator_name, coordinator_class, update_interval in COORDINATORS:
-        hass.data[DOMAIN][entry.entry_id][coordinator_name] = coordinator_class(
-            hass, nextdns, profile_id, update_interval
-        )
-        tasks.append(
-            hass.data[DOMAIN][entry.entry_id][
-                coordinator_name
-            ].async_config_entry_first_refresh()
-        )
+        coordinator = coordinator_class(hass, nextdns, profile_id, update_interval)
+        tasks.append(coordinator.async_config_entry_first_refresh())
+        coordinators[coordinator_name] = coordinator
 
     await asyncio.gather(*tasks)
 
-    hass.config_entries.async_setup_platforms(entry, PLATFORMS)
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinators
+
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     return True
 

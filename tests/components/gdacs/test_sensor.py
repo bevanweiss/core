@@ -19,16 +19,18 @@ from homeassistant.const import (
     CONF_RADIUS,
     EVENT_HOMEASSISTANT_START,
 )
+from homeassistant.core import HomeAssistant
 from homeassistant.setup import async_setup_component
 import homeassistant.util.dt as dt_util
 
+from . import _generate_mock_feed_entry
+
 from tests.common import async_fire_time_changed
-from tests.components.gdacs import _generate_mock_feed_entry
 
 CONFIG = {gdacs.DOMAIN: {CONF_RADIUS: 200}}
 
 
-async def test_setup(hass):
+async def test_setup(hass: HomeAssistant) -> None:
     """Test the general setup of the integration."""
     # Set up some mock feed entries for this test.
     mock_entry_1 = _generate_mock_feed_entry(
@@ -70,10 +72,10 @@ async def test_setup(hass):
             == 4
         )
 
-        state = hass.states.get("sensor.gdacs_32_87336_117_22743")
+        state = hass.states.get("sensor.32_87336_117_22743")
         assert state is not None
         assert int(state.state) == 3
-        assert state.name == "GDACS (32.87336, -117.22743)"
+        assert state.name == "32.87336, -117.22743"
         attributes = state.attributes
         assert attributes[ATTR_STATUS] == "OK"
         assert attributes[ATTR_CREATED] == 3
@@ -94,7 +96,7 @@ async def test_setup(hass):
             == 4
         )
 
-        state = hass.states.get("sensor.gdacs_32_87336_117_22743")
+        state = hass.states.get("sensor.32_87336_117_22743")
         attributes = state.attributes
         assert attributes[ATTR_CREATED] == 1
         assert attributes[ATTR_UPDATED] == 2
@@ -123,6 +125,6 @@ async def test_setup(hass):
             == 1
         )
 
-        state = hass.states.get("sensor.gdacs_32_87336_117_22743")
+        state = hass.states.get("sensor.32_87336_117_22743")
         attributes = state.attributes
         assert attributes[ATTR_REMOVED] == 3

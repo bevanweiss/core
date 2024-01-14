@@ -7,12 +7,12 @@ from requests.exceptions import ConnectTimeout
 
 from homeassistant.components import cloud
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_API_KEY, Platform
+from homeassistant.const import CONF_API_KEY, CONF_WEBHOOK_ID, Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv
 
-from .const import CONF_CLOUDHOOK_URL, CONF_MANUAL_RUN_MINS, CONF_WEBHOOK_ID, DOMAIN
+from .const import CONF_CLOUDHOOK_URL, CONF_MANUAL_RUN_MINS, DOMAIN
 from .device import RachioPerson
 from .webhooks import (
     async_get_or_create_registered_webhook_id_and_url,
@@ -86,7 +86,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _LOGGER.error("No Rachio devices found in account %s", person.username)
         return False
     _LOGGER.info(
-        "%d Rachio device(s) found; The url %s must be accessible from the internet in order to receive updates",
+        (
+            "%d Rachio device(s) found; The url %s must be accessible from the internet"
+            " in order to receive updates"
+        ),
         len(person.controllers),
         webhook_url,
     )

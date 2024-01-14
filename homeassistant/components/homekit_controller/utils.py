@@ -1,4 +1,5 @@
 """Helper functions for the homekit_controller component."""
+from functools import lru_cache
 from typing import cast
 
 from aiohomekit import Controller
@@ -8,8 +9,10 @@ from homeassistant.const import EVENT_HOMEASSISTANT_STOP
 from homeassistant.core import Event, HomeAssistant
 
 from .const import CONTROLLER
+from .storage import async_get_entity_storage
 
 
+@lru_cache
 def folded_name(name: str) -> str:
     """Return a name that is used for matching a similar string."""
     return name.casefold().replace(" ", "")
@@ -22,6 +25,8 @@ async def async_get_controller(hass: HomeAssistant) -> Controller:
 
     async_zeroconf_instance = await zeroconf.async_get_async_instance(hass)
 
+    char_cache = await async_get_entity_storage(hass)
+
     # In theory another call to async_get_controller could have run while we were
     # trying to get the zeroconf instance. So we check again to make sure we
     # don't leak a Controller instance here.
@@ -32,7 +37,8 @@ async def async_get_controller(hass: HomeAssistant) -> Controller:
 
     controller = Controller(
         async_zeroconf_instance=async_zeroconf_instance,
-        bleak_scanner_instance=bleak_scanner_instance,
+        bleak_scanner_instance=bleak_scanner_instance,  # type: ignore[arg-type]
+        char_cache=char_cache,
     )
 
     hass.data[CONTROLLER] = controller

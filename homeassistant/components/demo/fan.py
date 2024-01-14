@@ -7,7 +7,6 @@ from homeassistant.components.fan import FanEntity, FanEntityFeature
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 
 PRESET_MODE_AUTO = "auto"
 PRESET_MODE_SMART = "smart"
@@ -20,13 +19,12 @@ FULL_SUPPORT = (
 LIMITED_SUPPORT = FanEntityFeature.SET_SPEED
 
 
-async def async_setup_platform(
+async def async_setup_entry(
     hass: HomeAssistant,
-    config: ConfigType,
+    config_entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
-    discovery_info: DiscoveryInfoType | None = None,
 ) -> None:
-    """Set up the demo fan platform."""
+    """Set up the Demo config entry."""
     async_add_entities(
         [
             DemoPercentageFan(
@@ -88,36 +86,29 @@ async def async_setup_platform(
     )
 
 
-async def async_setup_entry(
-    hass: HomeAssistant,
-    config_entry: ConfigEntry,
-    async_add_entities: AddEntitiesCallback,
-) -> None:
-    """Set up the Demo config entry."""
-    await async_setup_platform(hass, {}, async_add_entities)
-
-
 class BaseDemoFan(FanEntity):
     """A demonstration fan component that uses legacy fan speeds."""
 
+    _attr_should_poll = False
+
     def __init__(
         self,
-        hass,
+        hass: HomeAssistant,
         unique_id: str,
         name: str,
-        supported_features: int,
+        supported_features: FanEntityFeature,
         preset_modes: list[str] | None,
     ) -> None:
         """Initialize the entity."""
         self.hass = hass
         self._unique_id = unique_id
-        self._supported_features = supported_features
+        self._attr_supported_features = supported_features
         self._percentage: int | None = None
         self._preset_modes = preset_modes
         self._preset_mode: str | None = None
         self._oscillating: bool | None = None
         self._direction: str | None = None
-        self._name = name
+        self._attr_name = name
         if supported_features & FanEntityFeature.OSCILLATE:
             self._oscillating = False
         if supported_features & FanEntityFeature.DIRECTION:
@@ -129,16 +120,6 @@ class BaseDemoFan(FanEntity):
         return self._unique_id
 
     @property
-    def name(self) -> str:
-        """Get entity name."""
-        return self._name
-
-    @property
-    def should_poll(self) -> bool:
-        """No polling needed for a demo fan."""
-        return False
-
-    @property
     def current_direction(self) -> str | None:
         """Fan direction."""
         return self._direction
@@ -147,11 +128,6 @@ class BaseDemoFan(FanEntity):
     def oscillating(self) -> bool | None:
         """Oscillating."""
         return self._oscillating
-
-    @property
-    def supported_features(self) -> int:
-        """Flag supported features."""
-        return self._supported_features
 
 
 class DemoPercentageFan(BaseDemoFan, FanEntity):
@@ -185,12 +161,9 @@ class DemoPercentageFan(BaseDemoFan, FanEntity):
 
     def set_preset_mode(self, preset_mode: str) -> None:
         """Set new preset mode."""
-        if self.preset_modes and preset_mode in self.preset_modes:
-            self._preset_mode = preset_mode
-            self._percentage = None
-            self.schedule_update_ha_state()
-        else:
-            raise ValueError(f"Invalid preset mode: {preset_mode}")
+        self._preset_mode = preset_mode
+        self._percentage = None
+        self.schedule_update_ha_state()
 
     def turn_on(
         self,
@@ -254,10 +227,6 @@ class AsyncDemoPercentageFan(BaseDemoFan, FanEntity):
 
     async def async_set_preset_mode(self, preset_mode: str) -> None:
         """Set new preset mode."""
-        if self.preset_modes is None or preset_mode not in self.preset_modes:
-            raise ValueError(
-                f"{preset_mode} is not a valid preset_mode: {self.preset_modes}"
-            )
         self._preset_mode = preset_mode
         self._percentage = None
         self.async_write_ha_state()

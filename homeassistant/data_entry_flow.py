@@ -3,18 +3,31 @@ from __future__ import annotations
 
 import abc
 import asyncio
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
+from contextlib import suppress
+import copy
 from dataclasses import dataclass
+from enum import StrEnum
+from functools import partial
+import logging
 from types import MappingProxyType
-from typing import Any, TypedDict
+from typing import Any, Required, TypedDict
 
 import voluptuous as vol
 
-from .backports.enum import StrEnum
 from .core import HomeAssistant, callback
 from .exceptions import HomeAssistantError
+from .helpers.deprecation import (
+    DeprecatedConstantEnum,
+    all_with_deprecated_constants,
+    check_if_deprecated_constant,
+    dir_with_deprecated_constants,
+)
 from .helpers.frame import report
+from .loader import async_suggest_report_issue
 from .util import uuid as uuid_util
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class FlowResultType(StrEnum):
@@ -31,26 +44,49 @@ class FlowResultType(StrEnum):
 
 
 # RESULT_TYPE_* is deprecated, to be removed in 2022.9
-RESULT_TYPE_FORM = "form"
-RESULT_TYPE_CREATE_ENTRY = "create_entry"
-RESULT_TYPE_ABORT = "abort"
-RESULT_TYPE_EXTERNAL_STEP = "external"
-RESULT_TYPE_EXTERNAL_STEP_DONE = "external_done"
-RESULT_TYPE_SHOW_PROGRESS = "progress"
-RESULT_TYPE_SHOW_PROGRESS_DONE = "progress_done"
-RESULT_TYPE_MENU = "menu"
+_DEPRECATED_RESULT_TYPE_FORM = DeprecatedConstantEnum(FlowResultType.FORM, "2025.1")
+_DEPRECATED_RESULT_TYPE_CREATE_ENTRY = DeprecatedConstantEnum(
+    FlowResultType.CREATE_ENTRY, "2025.1"
+)
+_DEPRECATED_RESULT_TYPE_ABORT = DeprecatedConstantEnum(FlowResultType.ABORT, "2025.1")
+_DEPRECATED_RESULT_TYPE_EXTERNAL_STEP = DeprecatedConstantEnum(
+    FlowResultType.EXTERNAL_STEP, "2025.1"
+)
+_DEPRECATED_RESULT_TYPE_EXTERNAL_STEP_DONE = DeprecatedConstantEnum(
+    FlowResultType.EXTERNAL_STEP_DONE, "2025.1"
+)
+_DEPRECATED_RESULT_TYPE_SHOW_PROGRESS = DeprecatedConstantEnum(
+    FlowResultType.SHOW_PROGRESS, "2025.1"
+)
+_DEPRECATED_RESULT_TYPE_SHOW_PROGRESS_DONE = DeprecatedConstantEnum(
+    FlowResultType.SHOW_PROGRESS_DONE, "2025.1"
+)
+_DEPRECATED_RESULT_TYPE_MENU = DeprecatedConstantEnum(FlowResultType.MENU, "2025.1")
 
 # Event that is fired when a flow is progressed via external or progress source.
 EVENT_DATA_ENTRY_FLOW_PROGRESSED = "data_entry_flow_progressed"
 
+FLOW_NOT_COMPLETE_STEPS = {
+    FlowResultType.FORM,
+    FlowResultType.EXTERNAL_STEP,
+    FlowResultType.EXTERNAL_STEP_DONE,
+    FlowResultType.SHOW_PROGRESS,
+    FlowResultType.SHOW_PROGRESS_DONE,
+    FlowResultType.MENU,
+}
 
-@dataclass
+STEP_ID_OPTIONAL_STEPS = {
+    FlowResultType.SHOW_PROGRESS,
+}
+
+
+@dataclass(slots=True)
 class BaseServiceInfo:
     """Base class for discovery ServiceInfo."""
 
 
 class FlowError(HomeAssistantError):
-    """Error while configuring an account."""
+    """Base class for data entry errors."""
 
 
 class UnknownHandler(FlowError):
@@ -80,27 +116,30 @@ class AbortFlow(FlowError):
 class FlowResult(TypedDict, total=False):
     """Typed result dict."""
 
-    version: int
-    type: FlowResultType
-    flow_id: str
-    handler: str
-    title: str
-    data: Mapping[str, Any]
-    step_id: str
-    data_schema: vol.Schema | None
-    extra: str
-    required: bool
-    errors: dict[str, str] | None
-    description: str | None
-    description_placeholders: Mapping[str, str | None] | None
-    progress_action: str
-    url: str
-    reason: str
     context: dict[str, Any]
-    result: Any
+    data_schema: vol.Schema | None
+    data: Mapping[str, Any]
+    description_placeholders: Mapping[str, str | None] | None
+    description: str | None
+    errors: dict[str, str] | None
+    extra: str
+    flow_id: Required[str]
+    handler: Required[str]
     last_step: bool | None
-    options: Mapping[str, Any]
     menu_options: list[str] | dict[str, str]
+    minor_version: int
+    options: Mapping[str, Any]
+    preview: str | None
+    progress_action: str
+    progress_task: asyncio.Task[Any] | None
+    reason: str
+    required: bool
+    result: Any
+    step_id: str
+    title: str
+    type: FlowResultType
+    url: str
+    version: int
 
 
 @callback
@@ -108,16 +147,19 @@ def _async_flow_handler_to_flow_result(
     flows: Iterable[FlowHandler], include_uninitialized: bool
 ) -> list[FlowResult]:
     """Convert a list of FlowHandler to a partial FlowResult that can be serialized."""
-    return [
-        FlowResult(
+    results = []
+    for flow in flows:
+        if not include_uninitialized and flow.cur_step is None:
+            continue
+        result = FlowResult(
             flow_id=flow.flow_id,
             handler=flow.handler,
             context=flow.context,
-            step_id=flow.cur_step["step_id"] if flow.cur_step else None,
         )
-        for flow in flows
-        if include_uninitialized or flow.cur_step is not None
-    ]
+        if flow.cur_step:
+            result["step_id"] = flow.cur_step["step_id"]
+        results.append(result)
+    return results
 
 
 class FlowManager(abc.ABC):
@@ -129,22 +171,15 @@ class FlowManager(abc.ABC):
     ) -> None:
         """Initialize the flow manager."""
         self.hass = hass
-        self._initializing: dict[str, list[asyncio.Future]] = {}
-        self._initialize_tasks: dict[str, list[asyncio.Task]] = {}
+        self._preview: set[str] = set()
         self._progress: dict[str, FlowHandler] = {}
-        self._handler_progress_index: dict[str, set[str]] = {}
-
-    async def async_wait_init_flow_finish(self, handler: str) -> None:
-        """Wait till all flows in progress are initialized."""
-        if not (current := self._initializing.get(handler)):
-            return
-
-        await asyncio.wait(current)
+        self._handler_progress_index: dict[str, set[FlowHandler]] = {}
+        self._init_data_process_index: dict[type, set[FlowHandler]] = {}
 
     @abc.abstractmethod
     async def async_create_flow(
         self,
-        handler_key: Any,
+        handler_key: str,
         *,
         context: dict[str, Any] | None = None,
         data: dict[str, Any] | None = None,
@@ -158,24 +193,32 @@ class FlowManager(abc.ABC):
     async def async_finish_flow(
         self, flow: FlowHandler, result: FlowResult
     ) -> FlowResult:
-        """Finish a config flow and add an entry."""
+        """Finish a data entry flow."""
 
     async def async_post_init(self, flow: FlowHandler, result: FlowResult) -> None:
         """Entry has finished executing its first step asynchronously."""
 
     @callback
     def async_has_matching_flow(
-        self, handler: str, context: dict[str, Any], data: Any
+        self, handler: str, match_context: dict[str, Any], data: Any
     ) -> bool:
-        """Check if an existing matching flow is in progress with the same handler, context, and data."""
-        return any(
-            flow
-            for flow in self._async_progress_by_handler(handler)
-            if flow.context["source"] == context["source"] and flow.init_data == data
-        )
+        """Check if an existing matching flow is in progress.
+
+        A flow with the same handler, context, and data.
+
+        If match_context is passed, only return flows with a context that is a
+        superset of match_context.
+        """
+        if not (flows := self._handler_progress_index.get(handler)):
+            return False
+        match_items = match_context.items()
+        for progress in flows:
+            if match_items <= progress.context.items() and progress.init_data == data:
+                return True
+        return False
 
     @callback
-    def async_get(self, flow_id: str) -> FlowResult | None:
+    def async_get(self, flow_id: str) -> FlowResult:
         """Return a flow in progress as a partial FlowResult."""
         if (flow := self._progress.get(flow_id)) is None:
             raise UnknownFlow
@@ -190,53 +233,62 @@ class FlowManager(abc.ABC):
 
     @callback
     def async_progress_by_handler(
-        self, handler: str, include_uninitialized: bool = False
+        self,
+        handler: str,
+        include_uninitialized: bool = False,
+        match_context: dict[str, Any] | None = None,
     ) -> list[FlowResult]:
-        """Return the flows in progress by handler as a partial FlowResult."""
+        """Return the flows in progress by handler as a partial FlowResult.
+
+        If match_context is specified, only return flows with a context that
+        is a superset of match_context.
+        """
         return _async_flow_handler_to_flow_result(
-            self._async_progress_by_handler(handler), include_uninitialized
+            self._async_progress_by_handler(handler, match_context),
+            include_uninitialized,
         )
 
     @callback
-    def _async_progress_by_handler(self, handler: str) -> list[FlowHandler]:
-        """Return the flows in progress by handler."""
+    def async_progress_by_init_data_type(
+        self,
+        init_data_type: type,
+        matcher: Callable[[Any], bool],
+        include_uninitialized: bool = False,
+    ) -> list[FlowResult]:
+        """Return flows in progress init matching by data type as a partial FlowResult."""
+        return _async_flow_handler_to_flow_result(
+            (
+                progress
+                for progress in self._init_data_process_index.get(init_data_type, set())
+                if matcher(progress.init_data)
+            ),
+            include_uninitialized,
+        )
+
+    @callback
+    def _async_progress_by_handler(
+        self, handler: str, match_context: dict[str, Any] | None
+    ) -> list[FlowHandler]:
+        """Return the flows in progress by handler.
+
+        If match_context is specified, only return flows with a context that
+        is a superset of match_context.
+        """
+        if not match_context:
+            return list(self._handler_progress_index.get(handler, ()))
+        match_context_items = match_context.items()
         return [
-            self._progress[flow_id]
-            for flow_id in self._handler_progress_index.get(handler, {})
+            progress
+            for progress in self._handler_progress_index.get(handler, ())
+            if match_context_items <= progress.context.items()
         ]
 
     async def async_init(
         self, handler: str, *, context: dict[str, Any] | None = None, data: Any = None
     ) -> FlowResult:
-        """Start a configuration flow."""
+        """Start a data entry flow."""
         if context is None:
             context = {}
-
-        init_done: asyncio.Future = asyncio.Future()
-        self._initializing.setdefault(handler, []).append(init_done)
-
-        task = asyncio.create_task(self._async_init(init_done, handler, context, data))
-        self._initialize_tasks.setdefault(handler, []).append(task)
-
-        try:
-            flow, result = await task
-        finally:
-            self._initialize_tasks[handler].remove(task)
-            self._initializing[handler].remove(init_done)
-
-        if result["type"] != FlowResultType.ABORT:
-            await self.async_post_init(flow, result)
-
-        return result
-
-    async def _async_init(
-        self,
-        init_done: asyncio.Future,
-        handler: str,
-        context: dict,
-        data: Any,
-    ) -> tuple[FlowHandler, FlowResult]:
-        """Run the init in a task to allow it to be canceled at shutdown."""
         flow = await self.async_create_flow(handler, context=context, data=data)
         if not flow:
             raise UnknownFlow("Flow was not created")
@@ -246,27 +298,28 @@ class FlowManager(abc.ABC):
         flow.context = context
         flow.init_data = data
         self._async_add_flow_progress(flow)
-        result = await self._async_handle_step(flow, flow.init_step, data, init_done)
-        return flow, result
 
-    async def async_shutdown(self) -> None:
-        """Cancel any initializing flows."""
-        for task_list in self._initialize_tasks.values():
-            for task in task_list:
-                task.cancel()
+        result = await self._async_handle_step(flow, flow.init_step, data)
+
+        if result["type"] != FlowResultType.ABORT:
+            await self.async_post_init(flow, result)
+
+        return result
 
     async def async_configure(
         self, flow_id: str, user_input: dict | None = None
     ) -> FlowResult:
-        """Continue a configuration flow."""
+        """Continue a data entry flow."""
         if (flow := self._progress.get(flow_id)) is None:
             raise UnknownFlow
 
         cur_step = flow.cur_step
         assert cur_step is not None
 
-        if cur_step.get("data_schema") is not None and user_input is not None:
-            user_input = cur_step["data_schema"](user_input)
+        if (
+            data_schema := cur_step.get("data_schema")
+        ) is not None and user_input is not None:
+            user_input = data_schema(user_input)
 
         # Handle a menu navigation choice
         if cur_step["type"] == FlowResultType.MENU and user_input:
@@ -299,14 +352,22 @@ class FlowManager(abc.ABC):
                 FlowResultType.SHOW_PROGRESS_DONE,
             ):
                 raise ValueError(
-                    "Show progress can only transition to show progress or show progress done."
+                    "Show progress can only transition to show progress or show"
+                    " progress done."
                 )
 
             # If the result has changed from last result, fire event to update
-            # the frontend.
-            if (
-                cur_step["step_id"] != result.get("step_id")
-                or result["type"] == FlowResultType.SHOW_PROGRESS
+            # the frontend. The result is considered to have changed if:
+            # - The step has changed
+            # - The step is same but result type is SHOW_PROGRESS and progress_action
+            #   or description_placeholders has changed
+            if cur_step["step_id"] != result.get("step_id") or (
+                result["type"] == FlowResultType.SHOW_PROGRESS
+                and (
+                    cur_step["progress_action"] != result.get("progress_action")
+                    or cur_step["description_placeholders"]
+                    != result.get("description_placeholders")
+                )
             ):
                 # Tell frontend to reload the flow state.
                 self.hass.bus.async_fire(
@@ -324,37 +385,44 @@ class FlowManager(abc.ABC):
     @callback
     def _async_add_flow_progress(self, flow: FlowHandler) -> None:
         """Add a flow to in progress."""
+        if flow.init_data is not None:
+            init_data_type = type(flow.init_data)
+            self._init_data_process_index.setdefault(init_data_type, set()).add(flow)
         self._progress[flow.flow_id] = flow
-        self._handler_progress_index.setdefault(flow.handler, set()).add(flow.flow_id)
+        self._handler_progress_index.setdefault(flow.handler, set()).add(flow)
+
+    @callback
+    def _async_remove_flow_from_index(self, flow: FlowHandler) -> None:
+        """Remove a flow from in progress."""
+        if flow.init_data is not None:
+            init_data_type = type(flow.init_data)
+            self._init_data_process_index[init_data_type].remove(flow)
+            if not self._init_data_process_index[init_data_type]:
+                del self._init_data_process_index[init_data_type]
+        handler = flow.handler
+        self._handler_progress_index[handler].remove(flow)
+        if not self._handler_progress_index[handler]:
+            del self._handler_progress_index[handler]
 
     @callback
     def _async_remove_flow_progress(self, flow_id: str) -> None:
         """Remove a flow from in progress."""
         if (flow := self._progress.pop(flow_id, None)) is None:
             raise UnknownFlow
-        handler = flow.handler
-        self._handler_progress_index[handler].remove(flow.flow_id)
-        if not self._handler_progress_index[handler]:
-            del self._handler_progress_index[handler]
+        self._async_remove_flow_from_index(flow)
+        flow.async_cancel_progress_task()
+        try:
+            flow.async_remove()
+        except Exception as err:  # pylint: disable=broad-except
+            _LOGGER.exception("Error removing %s flow: %s", flow.handler, err)
 
     async def _async_handle_step(
-        self,
-        flow: Any,
-        step_id: str,
-        user_input: dict | BaseServiceInfo | None,
-        step_done: asyncio.Future | None = None,
+        self, flow: FlowHandler, step_id: str, user_input: dict | BaseServiceInfo | None
     ) -> FlowResult:
         """Handle a step of a flow."""
+        self._raise_if_step_does_not_exist(flow, step_id)
+
         method = f"async_step_{step_id}"
-
-        if not hasattr(flow, method):
-            self._async_remove_flow_progress(flow.flow_id)
-            if step_done:
-                step_done.set_result(None)
-            raise UnknownStep(
-                f"Handler {flow.__class__.__name__} doesn't support step {step_id}"
-            )
-
         try:
             result: FlowResult = await getattr(flow, method)(user_input)
         except AbortFlow as err:
@@ -362,29 +430,45 @@ class FlowManager(abc.ABC):
                 flow.flow_id, flow.handler, err.reason, err.description_placeholders
             )
 
-        # Mark the step as done.
-        # We do this before calling async_finish_flow because config entries will hit a
-        # circular dependency where async_finish_flow sets up new entry, which needs the
-        # integration to be set up, which is waiting for init to be done.
-        if step_done:
-            step_done.set_result(None)
+        # Setup the flow handler's preview if needed
+        if result.get("preview") is not None:
+            await self._async_setup_preview(flow)
 
         if not isinstance(result["type"], FlowResultType):
             result["type"] = FlowResultType(result["type"])  # type: ignore[unreachable]
             report(
-                "does not use FlowResultType enum for data entry flow result type. "
-                "This is deprecated and will stop working in Home Assistant 2022.9",
+                (
+                    "does not use FlowResultType enum for data entry flow result type. "
+                    "This is deprecated and will stop working in Home Assistant 2022.9"
+                ),
                 error_if_core=False,
             )
 
-        if result["type"] in (
-            FlowResultType.FORM,
-            FlowResultType.EXTERNAL_STEP,
-            FlowResultType.EXTERNAL_STEP_DONE,
-            FlowResultType.SHOW_PROGRESS,
-            FlowResultType.SHOW_PROGRESS_DONE,
-            FlowResultType.MENU,
+        if (
+            result["type"] == FlowResultType.SHOW_PROGRESS
+            and (progress_task := result.pop("progress_task", None))
+            and progress_task != flow.async_get_progress_task()
         ):
+            # The flow's progress task was changed, register a callback on it
+            async def call_configure() -> None:
+                with suppress(UnknownFlow):
+                    await self.async_configure(flow.flow_id)
+
+            def schedule_configure(_: asyncio.Task) -> None:
+                self.hass.async_create_task(call_configure())
+
+            progress_task.add_done_callback(schedule_configure)
+            flow.async_set_progress_task(progress_task)
+
+        elif result["type"] != FlowResultType.SHOW_PROGRESS:
+            flow.async_cancel_progress_task()
+
+        if result["type"] in STEP_ID_OPTIONAL_STEPS:
+            if "step_id" not in result:
+                result["step_id"] = step_id
+
+        if result["type"] in FLOW_NOT_COMPLETE_STEPS:
+            self._raise_if_step_does_not_exist(flow, result["step_id"])
             flow.cur_step = result
             return result
 
@@ -401,12 +485,28 @@ class FlowManager(abc.ABC):
 
         return result
 
+    def _raise_if_step_does_not_exist(self, flow: FlowHandler, step_id: str) -> None:
+        """Raise if the step does not exist."""
+        method = f"async_step_{step_id}"
+
+        if not hasattr(flow, method):
+            self._async_remove_flow_progress(flow.flow_id)
+            raise UnknownStep(
+                f"Handler {self.__class__.__name__} doesn't support step {step_id}"
+            )
+
+    async def _async_setup_preview(self, flow: FlowHandler) -> None:
+        """Set up preview for a flow handler."""
+        if flow.handler not in self._preview:
+            self._preview.add(flow.handler)
+            await flow.async_setup_preview(self.hass)
+
 
 class FlowHandler:
-    """Handle the configuration flow of a component."""
+    """Handle a data entry flow."""
 
     # Set by flow manager
-    cur_step: dict[str, Any] | None = None
+    cur_step: FlowResult | None = None
 
     # While not purely typed, it makes typehinting more useful for us
     # and removes the need for constant None checks or asserts.
@@ -424,16 +524,52 @@ class FlowHandler:
 
     # Set by developer
     VERSION = 1
+    MINOR_VERSION = 1
+
+    __progress_task: asyncio.Task[Any] | None = None
+    __no_progress_task_reported = False
 
     @property
     def source(self) -> str | None:
         """Source that initialized the flow."""
-        return self.context.get("source", None)
+        return self.context.get("source", None)  # type: ignore[no-any-return]
 
     @property
     def show_advanced_options(self) -> bool:
         """If we should show advanced options."""
-        return self.context.get("show_advanced_options", False)
+        return self.context.get("show_advanced_options", False)  # type: ignore[no-any-return]
+
+    def add_suggested_values_to_schema(
+        self, data_schema: vol.Schema, suggested_values: Mapping[str, Any] | None
+    ) -> vol.Schema:
+        """Make a copy of the schema, populated with suggested values.
+
+        For each schema marker matching items in `suggested_values`,
+        the `suggested_value` will be set. The existing `suggested_value` will
+        be left untouched if there is no matching item.
+        """
+        schema = {}
+        for key, val in data_schema.schema.items():
+            if isinstance(key, vol.Marker):
+                # Exclude advanced field
+                if (
+                    key.description
+                    and key.description.get("advanced")
+                    and not self.show_advanced_options
+                ):
+                    continue
+
+            new_key = key
+            if (
+                suggested_values
+                and key in suggested_values
+                and isinstance(key, vol.Marker)
+            ):
+                # Copy the marker to not modify the flow schema
+                new_key = copy.copy(key)
+                new_key.description = {"suggested_value": suggested_values[key]}
+            schema[new_key] = val
+        return vol.Schema(schema)
 
     @callback
     def async_show_form(
@@ -444,6 +580,7 @@ class FlowHandler:
         errors: dict[str, str] | None = None,
         description_placeholders: Mapping[str, str | None] | None = None,
         last_step: bool | None = None,
+        preview: str | None = None,
     ) -> FlowResult:
         """Return the definition of a form to gather user input."""
         return FlowResult(
@@ -455,28 +592,33 @@ class FlowHandler:
             errors=errors,
             description_placeholders=description_placeholders,
             last_step=last_step,  # Display next or submit button in frontend
+            preview=preview,  # Display preview component in frontend
         )
 
     @callback
     def async_create_entry(
         self,
         *,
-        title: str,
+        title: str | None = None,
         data: Mapping[str, Any],
         description: str | None = None,
         description_placeholders: Mapping[str, str] | None = None,
     ) -> FlowResult:
-        """Finish config flow and create a config entry."""
-        return FlowResult(
+        """Finish flow."""
+        flow_result = FlowResult(
             version=self.VERSION,
+            minor_version=self.MINOR_VERSION,
             type=FlowResultType.CREATE_ENTRY,
             flow_id=self.flow_id,
             handler=self.handler,
-            title=title,
             data=data,
             description=description,
             description_placeholders=description_placeholders,
+            context=self.context,
         )
+        if title is not None:
+            flow_result["title"] = title
+        return flow_result
 
     @callback
     def async_abort(
@@ -485,7 +627,7 @@ class FlowHandler:
         reason: str,
         description_placeholders: Mapping[str, str] | None = None,
     ) -> FlowResult:
-        """Abort the config flow."""
+        """Abort the flow."""
         return _create_abort_data(
             self.flow_id, self.handler, reason, description_placeholders
         )
@@ -522,19 +664,38 @@ class FlowHandler:
     def async_show_progress(
         self,
         *,
-        step_id: str,
+        step_id: str | None = None,
         progress_action: str,
         description_placeholders: Mapping[str, str] | None = None,
+        progress_task: asyncio.Task[Any] | None = None,
     ) -> FlowResult:
         """Show a progress message to the user, without user input allowed."""
-        return FlowResult(
+        if progress_task is None and not self.__no_progress_task_reported:
+            self.__no_progress_task_reported = True
+            cls = self.__class__
+            report_issue = async_suggest_report_issue(self.hass, module=cls.__module__)
+            _LOGGER.warning(
+                (
+                    "%s::%s calls async_show_progress without passing a progress task, "
+                    "this is not valid and will break in Home Assistant Core 2024.8. "
+                    "Please %s"
+                ),
+                cls.__module__,
+                cls.__name__,
+                report_issue,
+            )
+
+        result = FlowResult(
             type=FlowResultType.SHOW_PROGRESS,
             flow_id=self.flow_id,
             handler=self.handler,
-            step_id=step_id,
             progress_action=progress_action,
             description_placeholders=description_placeholders,
+            progress_task=progress_task,
         )
+        if step_id is not None:
+            result["step_id"] = step_id
+        return result
 
     @callback
     def async_show_progress_done(self, *, next_step_id: str) -> FlowResult:
@@ -568,6 +729,34 @@ class FlowHandler:
             description_placeholders=description_placeholders,
         )
 
+    @callback
+    def async_remove(self) -> None:
+        """Notification that the flow has been removed."""
+
+    @staticmethod
+    async def async_setup_preview(hass: HomeAssistant) -> None:
+        """Set up preview."""
+
+    @callback
+    def async_cancel_progress_task(self) -> None:
+        """Cancel in progress task."""
+        if self.__progress_task and not self.__progress_task.done():
+            self.__progress_task.cancel()
+        self.__progress_task = None
+
+    @callback
+    def async_get_progress_task(self) -> asyncio.Task[Any] | None:
+        """Get in progress task."""
+        return self.__progress_task
+
+    @callback
+    def async_set_progress_task(
+        self,
+        progress_task: asyncio.Task[Any],
+    ) -> None:
+        """Set in progress task."""
+        self.__progress_task = progress_task
+
 
 @callback
 def _create_abort_data(
@@ -584,3 +773,11 @@ def _create_abort_data(
         reason=reason,
         description_placeholders=description_placeholders,
     )
+
+
+# These can be removed if no deprecated constant are in this module anymore
+__getattr__ = partial(check_if_deprecated_constant, module_globals=globals())
+__dir__ = partial(
+    dir_with_deprecated_constants, module_globals_keys=[*globals().keys()]
+)
+__all__ = all_with_deprecated_constants(globals())

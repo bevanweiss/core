@@ -5,22 +5,30 @@ import asyncio
 from collections.abc import Callable
 from datetime import timedelta
 import logging
+from typing import Any
 
-import async_timeout
 from pydantic import BaseModel  # pylint: disable=no-name-in-module
 from systembridgeconnector.exceptions import (
     AuthenticationException,
     ConnectionClosedException,
     ConnectionErrorException,
 )
-from systembridgeconnector.models.battery import Battery
-from systembridgeconnector.models.cpu import Cpu
-from systembridgeconnector.models.disk import Disk
-from systembridgeconnector.models.display import Display
-from systembridgeconnector.models.gpu import Gpu
-from systembridgeconnector.models.memory import Memory
-from systembridgeconnector.models.system import System
 from systembridgeconnector.websocket_client import WebSocketClient
+from systembridgemodels.battery import Battery
+from systembridgemodels.cpu import Cpu
+from systembridgemodels.disk import Disk
+from systembridgemodels.display import Display
+from systembridgemodels.get_data import GetData
+from systembridgemodels.gpu import Gpu
+from systembridgemodels.media import Media
+from systembridgemodels.media_directories import MediaDirectories
+from systembridgemodels.media_files import File as MediaFile, MediaFiles
+from systembridgemodels.media_get_file import MediaGetFile
+from systembridgemodels.media_get_files import MediaGetFiles
+from systembridgemodels.memory import Memory
+from systembridgemodels.processes import Processes
+from systembridgemodels.register_data_listener import RegisterDataListener
+from systembridgemodels.system import System
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
@@ -44,7 +52,9 @@ class SystemBridgeCoordinatorData(BaseModel):
     disk: Disk = None
     display: Display = None
     gpu: Gpu = None
+    media: Media = None
     memory: Memory = None
+    processes: Processes = None
     system: System = None
 
 
@@ -75,6 +85,7 @@ class SystemBridgeDataUpdateCoordinator(
             hass, LOGGER, name=DOMAIN, update_interval=timedelta(seconds=30)
         )
 
+    @property
     def is_ready(self) -> bool:
         """Return if the data is ready."""
         if self.data is None:
@@ -93,12 +104,44 @@ class SystemBridgeDataUpdateCoordinator(
         if not self.websocket_client.connected:
             await self._setup_websocket()
 
-        self.hass.async_create_task(self.websocket_client.get_data(modules))
+        self.hass.async_create_task(
+            self.websocket_client.get_data(GetData(modules=modules))
+        )
+
+    async def async_get_media_directories(self) -> MediaDirectories:
+        """Get media directories."""
+        return await self.websocket_client.get_directories()
+
+    async def async_get_media_files(
+        self,
+        base: str,
+        path: str | None = None,
+    ) -> MediaFiles:
+        """Get media files."""
+        return await self.websocket_client.get_files(
+            MediaGetFiles(
+                base=base,
+                path=path,
+            )
+        )
+
+    async def async_get_media_file(
+        self,
+        base: str,
+        path: str,
+    ) -> MediaFile:
+        """Get media file."""
+        return await self.websocket_client.get_file(
+            MediaGetFile(
+                base=base,
+                path=path,
+            )
+        )
 
     async def async_handle_module(
         self,
         module_name: str,
-        module,
+        module: Any,
     ) -> None:
         """Handle data from the WebSocket client."""
         self.logger.debug("Set new data for: %s", module_name)
@@ -118,7 +161,7 @@ class SystemBridgeDataUpdateCoordinator(
             self.last_update_success = False
             self.async_update_listeners()
         except (ConnectionClosedException, ConnectionResetError) as exception:
-            self.logger.info(
+            self.logger.debug(
                 "Websocket connection closed for %s. Will retry: %s",
                 self.title,
                 exception,
@@ -129,7 +172,7 @@ class SystemBridgeDataUpdateCoordinator(
             self.last_update_success = False
             self.async_update_listeners()
         except ConnectionErrorException as exception:
-            self.logger.warning(
+            self.logger.debug(
                 "Connection error occurred for %s. Will retry: %s",
                 self.title,
                 exception,
@@ -143,10 +186,19 @@ class SystemBridgeDataUpdateCoordinator(
     async def _setup_websocket(self) -> None:
         """Use WebSocket for updates."""
         try:
-            async with async_timeout.timeout(20):
+            async with asyncio.timeout(20):
                 await self.websocket_client.connect(
                     session=async_get_clientsession(self.hass),
                 )
+
+            self.hass.async_create_background_task(
+                self._listen_for_data(),
+                name="System Bridge WebSocket Listener",
+            )
+
+            await self.websocket_client.register_data_listener(
+                RegisterDataListener(modules=MODULES)
+            )
         except AuthenticationException as exception:
             self.last_update_success = False
             self.logger.error("Authentication failed for %s: %s", self.title, exception)
@@ -171,10 +223,6 @@ class SystemBridgeDataUpdateCoordinator(
             )
             self.last_update_success = False
             self.async_update_listeners()
-
-        self.hass.async_create_task(self._listen_for_data())
-
-        await self.websocket_client.register_data_listener(MODULES)
 
         self.last_update_success = True
         self.async_update_listeners()

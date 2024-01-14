@@ -10,8 +10,7 @@ import voluptuous as vol
 
 from homeassistant.auth.models import User
 from homeassistant.auth.providers import homeassistant as auth_ha
-from homeassistant.components.http import HomeAssistantView
-from homeassistant.components.http.const import KEY_HASS_USER
+from homeassistant.components.http import KEY_HASS_USER, HomeAssistantView
 from homeassistant.components.http.data_validator import RequestDataValidator
 from homeassistant.core import HomeAssistant, callback
 import homeassistant.helpers.config_validation as cv
@@ -22,7 +21,7 @@ _LOGGER = logging.getLogger(__name__)
 
 
 @callback
-def async_setup_auth_view(hass: HomeAssistant, user: User):
+def async_setup_auth_view(hass: HomeAssistant, user: User) -> None:
     """Auth setup."""
     hassio_auth = HassIOAuth(hass, user)
     hassio_password_reset = HassIOPasswordReset(hass, user)
@@ -39,7 +38,7 @@ class HassIOBaseAuth(HomeAssistantView):
         self.hass = hass
         self.user = user
 
-    def _check_access(self, request: web.Request):
+    def _check_access(self, request: web.Request) -> None:
         """Check if this call is from Supervisor."""
         # Check caller IP
         hassio_ip = os.environ["SUPERVISOR"].split(":")[0]
@@ -72,7 +71,7 @@ class HassIOAuth(HassIOBaseAuth):
             extra=vol.ALLOW_EXTRA,
         )
     )
-    async def post(self, request, data):
+    async def post(self, request: web.Request, data: dict[str, str]) -> web.Response:
         """Handle auth requests."""
         self._check_access(request)
         provider = auth_ha.async_get_provider(request.app["hass"])
@@ -102,7 +101,7 @@ class HassIOPasswordReset(HassIOBaseAuth):
             extra=vol.ALLOW_EXTRA,
         )
     )
-    async def post(self, request, data):
+    async def post(self, request: web.Request, data: dict[str, str]) -> web.Response:
         """Handle password reset requests."""
         self._check_access(request)
         provider = auth_ha.async_get_provider(request.app["hass"])

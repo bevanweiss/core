@@ -4,7 +4,8 @@ import upb_lib
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import ATTR_COMMAND, CONF_FILE_PATH, CONF_HOST, Platform
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers.entity import DeviceInfo, Entity
+from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.helpers.entity import Entity
 
 from .const import (
     ATTR_ADDRESS,
@@ -68,6 +69,8 @@ async def async_unload_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> 
 class UpbEntity(Entity):
     """Base class for all UPB entities."""
 
+    _attr_should_poll = False
+
     def __init__(self, element, unique_id, upb):
         """Initialize the base of all UPB devices."""
         self._upb = upb
@@ -79,11 +82,6 @@ class UpbEntity(Entity):
     def unique_id(self):
         """Return unique id of the element."""
         return self._unique_id
-
-    @property
-    def should_poll(self) -> bool:
-        """Don't poll this device."""
-        return False
 
     @property
     def extra_state_attributes(self):

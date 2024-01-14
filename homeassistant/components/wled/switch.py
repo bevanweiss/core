@@ -6,8 +6,8 @@ from typing import Any
 
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import (
@@ -55,7 +55,7 @@ class WLEDNightlightSwitch(WLEDEntity, SwitchEntity):
 
     _attr_icon = "mdi:weather-night"
     _attr_entity_category = EntityCategory.CONFIG
-    _attr_name = "Nightlight"
+    _attr_translation_key = "nightlight"
 
     def __init__(self, coordinator: WLEDDataUpdateCoordinator) -> None:
         """Initialize WLED nightlight switch."""
@@ -65,10 +65,11 @@ class WLEDNightlightSwitch(WLEDEntity, SwitchEntity):
     @property
     def extra_state_attributes(self) -> dict[str, Any] | None:
         """Return the state attributes of the entity."""
+        state = self.coordinator.data.state
         return {
-            ATTR_DURATION: self.coordinator.data.state.nightlight.duration,
-            ATTR_FADE: self.coordinator.data.state.nightlight.fade,
-            ATTR_TARGET_BRIGHTNESS: self.coordinator.data.state.nightlight.target_brightness,
+            ATTR_DURATION: state.nightlight.duration,
+            ATTR_FADE: state.nightlight.fade,
+            ATTR_TARGET_BRIGHTNESS: state.nightlight.target_brightness,
         }
 
     @property
@@ -92,7 +93,7 @@ class WLEDSyncSendSwitch(WLEDEntity, SwitchEntity):
 
     _attr_icon = "mdi:upload-network-outline"
     _attr_entity_category = EntityCategory.CONFIG
-    _attr_name = "Sync send"
+    _attr_translation_key = "sync_send"
 
     def __init__(self, coordinator: WLEDDataUpdateCoordinator) -> None:
         """Initialize WLED sync send switch."""
@@ -125,7 +126,7 @@ class WLEDSyncReceiveSwitch(WLEDEntity, SwitchEntity):
 
     _attr_icon = "mdi:download-network-outline"
     _attr_entity_category = EntityCategory.CONFIG
-    _attr_name = "Sync receive"
+    _attr_translation_key = "sync_receive"
 
     def __init__(self, coordinator: WLEDDataUpdateCoordinator) -> None:
         """Initialize WLED sync receive switch."""
@@ -203,17 +204,16 @@ class WLEDReverseSwitch(WLEDEntity, SwitchEntity):
 def async_update_segments(
     coordinator: WLEDDataUpdateCoordinator,
     current_ids: set[int],
-    async_add_entities,
+    async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Update segments."""
     segment_ids = {segment.segment_id for segment in coordinator.data.state.segments}
 
-    new_entities = []
+    new_entities: list[WLEDReverseSwitch] = []
 
     # Process new segments, add them to Home Assistant
     for segment_id in segment_ids - current_ids:
         current_ids.add(segment_id)
         new_entities.append(WLEDReverseSwitch(coordinator, segment_id))
 
-    if new_entities:
-        async_add_entities(new_entities)
+    async_add_entities(new_entities)
